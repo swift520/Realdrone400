@@ -1,12 +1,9 @@
-sudo chmod 777 /dev/ttyACM0 & sleep 2;
-roslaunch mavros px4.launch & sleep 3;
-rosrun mavros mavcmd long 511 105 5000 0 0 0 0 0 & sleep 1;
-rosrun mavros mavcmd long 511 31 5000 0 0 0 0 0 & sleep 1;
+#!/bin/bash
 
-source /home/reallab/real_drone_400/devel/setup.bash;
-roslaunch realsense2_camera rs_camera.launch & sleep 3;
+# 1. 启动 MAVROS 飞控链路
+source /home/haowen2/code/REAL_DRONE_400/devel/setup.bash
+roslaunch real_drone_bringup takeoff_px4.launch & sleep 5
 
-cd mid360lio_ws;
-source devel/setup.bash;
-roslaunch livox_ros_driver2 msg_MID360.launch;
-
+# 2. 启动激光雷达
+source /home/haowen2/3rd_party/ws_livox/devel/setup.bash
+roslaunch livox_ros_driver2 msg_MID360.launch

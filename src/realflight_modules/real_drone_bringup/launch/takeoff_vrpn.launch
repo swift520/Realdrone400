@@ -1,0 +1,15 @@
+<launch>
+  <arg name="odom_topic" default="/Odometry" />
+  <arg name="mavros_local_pose_topic" default="/mavros/local_position/pose" />
+  <arg name="vision_pose_topic" default="/mavros/vision_pose/pose" />
+
+  <!-- Forward FAST-LIO odometry to MAVROS' external-vision input. -->
+  <node pkg="real_drone_bringup"
+        type="vision_pose_node"
+        name="vision_pose_node"
+        output="screen">
+    <remap from="/Odometry" to="$(arg odom_topic)" />
+    <remap from="/mavros/local_position/pose" to="$(arg mavros_local_pose_topic)" />
+    <remap from="/mavros/vision_pose/pose" to="$(arg vision_pose_topic)" />
+  </node>
+</launch>

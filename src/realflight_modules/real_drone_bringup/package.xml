@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>real_drone_bringup</name>
+  <version>0.1.0</version>
+  <description>REAL_DRONE_400 hardware bringup and odometry-to-MAVROS vision pose bridge.</description>
+
+  <maintainer email="linux@todo.todo">linux</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>roscpp</depend>
+  <depend>tf</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>roslaunch</exec_depend>
+</package>

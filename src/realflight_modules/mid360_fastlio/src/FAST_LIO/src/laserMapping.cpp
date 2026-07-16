@@ -33,6 +33,7 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
+#include <cmath>
 #include <mutex>
 #include <math.h>
 #include <thread>
@@ -141,9 +142,11 @@ shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
 ros::Publisher odomHigh_speed;
 double latest_time;
-V3D latest_P, latest_V, latest_Ba, latest_Bg, latest_acc_0, latest_gyr_0,acc_0,gyr_0;
+V3D latest_P, latest_V, latest_Ba, latest_Bg, latest_acc_0, latest_gyr_0;
 M3D latest_Q;
 bool init = false;
+bool latest_imu_seeded = false;
+constexpr double MAX_HIGH_RATE_IMU_DT = 0.1;
 
 void updateLatestStates(){
     latest_time = lidar_end_time;
@@ -152,14 +155,59 @@ void updateLatestStates(){
     latest_V = state_point.vel;
     latest_Ba = state_point.ba;
     latest_Bg = state_point.bg;
-    // latest_acc_0 = acc_0;
-    // latest_gyr_0 = gyr_0;
+
+    // Re-seed the trapezoidal IMU integrator from the last measurement used
+    // to propagate the corrected state to this LiDAR frame end.  Without
+    // this, the first high-rate prediction after startup uses an all-zero
+    // previous sample, and later corrections retain a sample from the old
+    // prediction interval.
+    if (!Measures.imu.empty())
+    {
+        const sensor_msgs::Imu::ConstPtr &last_imu = Measures.imu.back();
+        latest_acc_0 = V3D(last_imu->linear_acceleration.x,
+                           last_imu->linear_acceleration.y,
+                           last_imu->linear_acceleration.z);
+        latest_gyr_0 = V3D(last_imu->angular_velocity.x,
+                           last_imu->angular_velocity.y,
+                           last_imu->angular_velocity.z);
+        latest_imu_seeded = true;
+    }
+    else
+    {
+        // This should be rare because synchronized LiDAR packages normally
+        // contain IMU samples.  The next IMU callback will seed both ends of
+        // the first integration interval instead of using zero/stale data.
+        latest_imu_seeded = false;
+        ROS_WARN_THROTTLE(1.0, "No IMU sample available to seed high-rate odometry after LiDAR correction.");
+    }
 
 }
 
-void fastPredictIMU(double t, V3D acc, V3D gyr)
+bool fastPredictIMU(double t, const V3D &acc, const V3D &gyr)
 {
-    double dt = t - latest_time;
+    const double dt = t - latest_time;
+    if (!std::isfinite(dt) || dt <= 0.0)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "Reject high-rate IMU prediction with non-positive/invalid dt: %.9f s.", dt);
+        return false;
+    }
+    if (dt > MAX_HIGH_RATE_IMU_DT)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "Reject high-rate IMU prediction gap %.6f s (limit %.3f s); "
+                          "waiting for the next LiDAR correction.",
+                          dt, MAX_HIGH_RATE_IMU_DT);
+        return false;
+    }
+
+    if (!latest_imu_seeded)
+    {
+        latest_acc_0 = acc;
+        latest_gyr_0 = gyr;
+        latest_imu_seeded = true;
+    }
+
     latest_time = t;
     V3D un_acc_0 = latest_Q * (latest_acc_0 - latest_Ba) + V3D(state_point.grav[0],state_point.grav[1],state_point.grav[2]);
     V3D un_gyr = 0.5 * (latest_gyr_0 + gyr) - latest_Bg;
@@ -189,7 +237,8 @@ void fastPredictIMU(double t, V3D acc, V3D gyr)
     odomHigh.twist.twist.angular.y = gyr.y() - state_point.bg.y();
     odomHigh.twist.twist.angular.z = gyr.z() - state_point.bg.z();
 
-    odomHigh_speed.publish(odomHigh);    
+    odomHigh_speed.publish(odomHigh);
+    return true;
 }
 
 void SigHandle(int sig)
@@ -395,13 +444,6 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     msg->linear_acceleration.y *= G_m_s2;
     msg->linear_acceleration.z *= G_m_s2;
 
-    if(init)
-    {
-        fastPredictIMU(msg->header.stamp.toSec(),
-                V3D(msg->linear_acceleration.x,msg->linear_acceleration.y,msg->linear_acceleration.z),
-                V3D(msg->angular_velocity.x,msg->angular_velocity.y,msg->angular_velocity.z));
-    }
-
     msg->header.stamp = ros::Time().fromSec(msg_in->header.stamp.toSec() - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
     {
@@ -410,6 +452,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     }
 
     double timestamp = msg->header.stamp.toSec();
+    bool timestamp_regressed = false;
 
     mtx_buffer.lock();
 
@@ -417,12 +460,32 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     {
         ROS_WARN("imu loop back, clear buffer");
         imu_buffer.clear();
+        timestamp_regressed = true;
     }
 
     last_timestamp_imu = timestamp;
 
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
+
+    // Never propagate or publish from an IMU sample until its corrected
+    // timestamp has passed the monotonicity check above.  A rejected step
+    // disables high-rate prediction until the next LiDAR-corrected state
+    // re-anchors and re-seeds it.
+    if (timestamp_regressed)
+    {
+        init = false;
+        latest_imu_seeded = false;
+    }
+    else if (init && !fastPredictIMU(
+                         timestamp,
+                         V3D(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z),
+                         V3D(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z)))
+    {
+        init = false;
+        latest_imu_seeded = false;
+    }
+
     sig_buffer.notify_all();
 }
 

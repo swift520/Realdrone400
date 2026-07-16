@@ -1,0 +1,31 @@
+<launch>
+  <node pkg="real_drone_bringup"
+        type="vision_pose_node"
+        name="vision_pose_node"
+        output="screen">
+    <param name="publish_rate" value="50.0" />
+    <param name="high_rate_timeout" value="0.20" />
+    <param name="correction_timeout" value="0.35" />
+    <param name="recovery_duration" value="0.25" />
+    <param name="min_recovery_high_rate_samples" value="5" />
+    <param name="min_recovery_corrections" value="2" />
+    <param name="max_input_age" value="1.0" />
+    <param name="max_future_stamp" value="0.10" />
+    <param name="max_recovery_position_jump" value="0.50" />
+    <param name="body_to_sensor_x" value="0.0" />
+    <param name="body_to_sensor_y" value="0.0" />
+    <param name="body_to_sensor_z" value="0.10" />
+    <param name="max_body_to_sensor_distance" value="0.50" />
+    <param name="output_frame_id" value="map" />
+
+    <remap from="odom_high_rate" to="/test/odom_high_rate" />
+    <remap from="odom_correction" to="/test/odom_correction" />
+    <remap from="mavros/vision_pose/pose" to="/test/vision_pose" />
+    <remap from="localization/healthy" to="/test/localization_healthy" />
+  </node>
+
+  <test test-name="vision_pose_watchdog"
+        pkg="real_drone_bringup"
+        type="test_vision_pose_watchdog.py"
+        time-limit="35" />
+</launch>

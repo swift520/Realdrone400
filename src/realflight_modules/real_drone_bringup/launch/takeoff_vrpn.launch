@@ -1,15 +1,96 @@
 <launch>
-  <arg name="odom_topic" default="/Odometry" />
-  <arg name="mavros_local_pose_topic" default="/mavros/local_position/pose" />
-  <arg name="vision_pose_topic" default="/mavros/vision_pose/pose" />
+  <arg name="high_rate_odom_topic" default="/Odom_high_freq"
+       doc="IMU-propagated FAST-LIO odometry used as the pose data source." />
+  <arg name="correction_odom_topic" default="/Odometry"
+       doc="LiDAR-corrected FAST-LIO odometry used as an independent health gate." />
+  <arg name="vision_pose_topic" default="/mavros/vision_pose/pose"
+       doc="MAVROS external-vision PoseStamped input." />
+  <arg name="health_topic" default="/localization/healthy"
+       doc="Latched Bool indicating whether PX4 output is active." />
 
-  <!-- Forward FAST-LIO odometry to MAVROS' external-vision input. -->
+  <arg name="publish_rate" default="50.0" doc="Maximum PX4 output rate in Hz." />
+  <arg name="watchdog_rate" default="100.0" doc="Independent safety-watchdog check rate in Hz." />
+  <arg name="high_rate_timeout" default="0.15" doc="High-rate input timeout in seconds." />
+  <arg name="correction_timeout" default="0.50" doc="LiDAR-correction timeout in seconds." />
+  <arg name="recovery_duration" default="1.0" doc="Continuous validation time before output starts." />
+  <arg name="min_recovery_high_rate_samples" default="20"
+       doc="Minimum new high-rate samples required during recovery." />
+  <arg name="min_recovery_corrections" default="5"
+       doc="Minimum new LiDAR corrections required during recovery." />
+  <arg name="max_input_age" default="0.50" doc="Maximum source-stamp age in seconds; &lt;=0 disables." />
+  <arg name="max_future_stamp" default="0.10" doc="Allowed future source-stamp offset in seconds." />
+  <arg name="max_timestamp_skew" default="0.25"
+       doc="Maximum source-time advance beyond elapsed steady time, in seconds." />
+  <arg name="quaternion_norm_tolerance" default="0.10"
+       doc="Allowed absolute deviation of the input quaternion norm from one." />
+  <arg name="max_active_position_jump" default="1.0" doc="Maximum position step in metres while active." />
+  <arg name="max_active_orientation_jump" default="0.80" doc="Maximum orientation step in radians while active." />
+  <arg name="max_recovery_position_jump" default="0.50"
+       doc="Maximum recovery position difference from the last trusted pose." />
+  <arg name="max_recovery_orientation_jump" default="0.35"
+       doc="Maximum recovery orientation difference from the last trusted pose." />
+  <arg name="max_stream_position_difference" default="1.0"
+       doc="Maximum position disagreement between fresh high-rate and corrected poses." />
+  <arg name="max_stream_orientation_difference" default="0.80"
+       doc="Maximum orientation disagreement between fresh high-rate and corrected poses." />
+  <arg name="body_to_sensor_x" default="0.0"
+       doc="Body/FCU origin to MID360 internal-IMU origin, forward axis, metres." />
+  <arg name="body_to_sensor_y" default="0.0"
+       doc="Body/FCU origin to MID360 internal-IMU origin, left axis, metres." />
+  <arg name="body_to_sensor_z" default="0.10"
+       doc="Body/FCU origin to MID360 internal-IMU origin, up axis, metres." />
+  <arg name="max_body_to_sensor_distance" default="0.50"
+       doc="Reject a likely unit/sign configuration error above this lever-arm length, metres." />
+  <arg name="output_frame_id" default="map"
+       doc="Output frame label; MAVROS performs its standard ENU/FLU to NED/FRD conversion." />
+  <arg name="expected_high_rate_frame" default="world" doc="Required high-rate frame_id." />
+  <arg name="expected_high_rate_child_frame" default="odom_imu"
+       doc="Required high-rate child_frame_id." />
+  <arg name="expected_correction_frame" default="camera_init"
+       doc="Required corrected-odometry frame_id." />
+  <arg name="expected_correction_child_frame" default="body"
+       doc="Required corrected-odometry child_frame_id." />
+
+  <!--
+    The high-rate IMU-propagated state is the data source. The LiDAR-corrected
+    mapping odometry is an independent health gate. Either stream timing out
+    stops all external-vision output and latches a fault.
+  -->
   <node pkg="real_drone_bringup"
         type="vision_pose_node"
         name="vision_pose_node"
-        output="screen">
-    <remap from="/Odometry" to="$(arg odom_topic)" />
-    <remap from="/mavros/local_position/pose" to="$(arg mavros_local_pose_topic)" />
-    <remap from="/mavros/vision_pose/pose" to="$(arg vision_pose_topic)" />
+        output="screen"
+        required="true">
+    <param name="publish_rate" value="$(arg publish_rate)" />
+    <param name="watchdog_rate" value="$(arg watchdog_rate)" />
+    <param name="high_rate_timeout" value="$(arg high_rate_timeout)" />
+    <param name="correction_timeout" value="$(arg correction_timeout)" />
+    <param name="recovery_duration" value="$(arg recovery_duration)" />
+    <param name="min_recovery_high_rate_samples" value="$(arg min_recovery_high_rate_samples)" />
+    <param name="min_recovery_corrections" value="$(arg min_recovery_corrections)" />
+    <param name="max_input_age" value="$(arg max_input_age)" />
+    <param name="max_future_stamp" value="$(arg max_future_stamp)" />
+    <param name="max_timestamp_skew" value="$(arg max_timestamp_skew)" />
+    <param name="quaternion_norm_tolerance" value="$(arg quaternion_norm_tolerance)" />
+    <param name="max_active_position_jump" value="$(arg max_active_position_jump)" />
+    <param name="max_active_orientation_jump" value="$(arg max_active_orientation_jump)" />
+    <param name="max_recovery_position_jump" value="$(arg max_recovery_position_jump)" />
+    <param name="max_recovery_orientation_jump" value="$(arg max_recovery_orientation_jump)" />
+    <param name="max_stream_position_difference" value="$(arg max_stream_position_difference)" />
+    <param name="max_stream_orientation_difference" value="$(arg max_stream_orientation_difference)" />
+    <param name="body_to_sensor_x" value="$(arg body_to_sensor_x)" />
+    <param name="body_to_sensor_y" value="$(arg body_to_sensor_y)" />
+    <param name="body_to_sensor_z" value="$(arg body_to_sensor_z)" />
+    <param name="max_body_to_sensor_distance" value="$(arg max_body_to_sensor_distance)" />
+    <param name="output_frame_id" value="$(arg output_frame_id)" />
+    <param name="expected_high_rate_frame" value="$(arg expected_high_rate_frame)" />
+    <param name="expected_high_rate_child_frame" value="$(arg expected_high_rate_child_frame)" />
+    <param name="expected_correction_frame" value="$(arg expected_correction_frame)" />
+    <param name="expected_correction_child_frame" value="$(arg expected_correction_child_frame)" />
+
+    <remap from="odom_high_rate" to="$(arg high_rate_odom_topic)" />
+    <remap from="odom_correction" to="$(arg correction_odom_topic)" />
+    <remap from="mavros/vision_pose/pose" to="$(arg vision_pose_topic)" />
+    <remap from="localization/healthy" to="$(arg health_topic)" />
   </node>
 </launch>

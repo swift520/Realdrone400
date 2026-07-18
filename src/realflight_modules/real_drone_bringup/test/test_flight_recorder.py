@@ -37,6 +37,78 @@ class FlightRecorderUnitTest(unittest.TestCase):
         topics = MODULE.build_topics(extra_topics=["custom/topic", "/custom/topic"])
         self.assertEqual(topics.count("/custom/topic"), 1)
 
+    def test_realsense_profile_records_rgb_depth_and_calibration(self):
+        topics = MODULE.build_topics(
+            with_realsense=True,
+            realsense_namespace="front/camera/",
+        )
+        self.assertIn("/front/camera/color/image_raw", topics)
+        self.assertIn("/front/camera/color/camera_info", topics)
+        self.assertIn("/front/camera/depth/image_rect_raw", topics)
+        self.assertIn("/front/camera/depth/camera_info", topics)
+        self.assertIn("/front/camera/extrinsics/depth_to_color", topics)
+
+    def test_realsense_emitter_and_laser_are_verified(self):
+        class FakeClient:
+            def __init__(self, name, timeout):
+                self.name = name
+                self.timeout = timeout
+                self.closed = False
+
+            def get_parameter_descriptions(self, timeout):
+                return [
+                    {"name": "emitter_enabled"},
+                    {"name": "laser_power"},
+                ]
+
+            def update_configuration(self, changes):
+                self.changes = changes
+                return dict(changes)
+
+            def close(self):
+                self.closed = True
+
+        result = MODULE.enable_realsense_emitter(
+            "/camera/stereo_module",
+            laser_power=150.0,
+            timeout=2.0,
+            client_factory=FakeClient,
+        )
+        self.assertEqual(result, {"emitter_enabled": 1, "laser_power": 150.0})
+
+    def test_unavailable_realsense_is_removed_but_core_topics_remain(self):
+        recorder = MODULE.FlightRecorder.__new__(MODULE.FlightRecorder)
+        recorder.topics = MODULE.build_topics(
+            with_realsense=True,
+            extra_topics=["/custom/debug"],
+        )
+        recorder.realsense_topics = set(MODULE.build_realsense_topics("/camera"))
+        recorder.realsense_active = True
+        recorder.stream_timeouts = dict(MODULE.STREAM_TIMEOUTS)
+        recorder.stream_timeouts.update({
+            "realsense_color": 0.50,
+            "realsense_depth": 0.50,
+        })
+        recorder.metadata = {
+            "topics": list(recorder.topics),
+            "with_realsense": True,
+        }
+        recorder.events = EventSink()
+        recorder._write_metadata = lambda: None
+
+        recorder._continue_without_realsense("camera absent")
+
+        self.assertIn("/Odometry", recorder.topics)
+        self.assertIn("/mavros/state", recorder.topics)
+        self.assertIn("/custom/debug", recorder.topics)
+        self.assertNotIn("/camera/color/image_raw", recorder.topics)
+        self.assertNotIn("/camera/depth/image_rect_raw", recorder.topics)
+        self.assertFalse(recorder.metadata["with_realsense"])
+        self.assertFalse(recorder.realsense_active)
+        self.assertNotIn("realsense_color", recorder.stream_timeouts)
+        self.assertEqual(recorder.events.records[-1][0:2],
+                         ("WARN", "realsense_unavailable"))
+
     def test_tag_and_session_names_are_safe(self):
         self.assertEqual(MODULE.sanitize_tag(" hover test / 01 "), "hover_test_01")
         with tempfile.TemporaryDirectory() as root:

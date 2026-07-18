@@ -4,7 +4,7 @@
   <arg name="tgt_system" default="1" />
   <arg name="tgt_component" default="1" />
   <arg name="enable_vision_bridge" default="true"
-       doc="Start the FAST-LIO external-vision bridge and localization-health heartbeat." />
+       doc="Start the FAST-LIO external-vision bridge and localization-health heartbeat. Set false when takeoff_vrpn.launch is started separately; exactly one bridge may run." />
 
   <!-- Start MAVROS for the onboard PX4 serial link. -->
   <include file="$(find mavros)/launch/px4.launch">

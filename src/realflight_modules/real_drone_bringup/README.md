@@ -5,9 +5,10 @@ This package contains the two hardware bringup functions migrated from the
 
 - `takeoff_px4.launch` starts MAVROS on `/dev/ttyTHS0:921600` and, by default,
   includes the FAST-LIO vision/health bridge below. Despite its historical
-  name, it does not arm the vehicle or send a takeoff command. Set
-  `enable_vision_bridge:=false` only for maintenance where px4ctrl will not be
-  used.
+  name, it does not arm the vehicle or send a takeoff command. Keep the default
+  for standalone use. Set `enable_vision_bridge:=false` only when
+  `takeoff_vrpn.launch` will start the single bridge separately; never run two
+  bridge instances.
 - `takeoff_vrpn.launch` keeps its historical name for script compatibility,
   but it does not use VRPN. It forwards fresh FAST-LIO high-rate poses to
   MAVROS and independently requires fresh LiDAR-corrected mapping odometry.
@@ -169,6 +170,28 @@ available with `--with-registered-cloud`, but it is large and can add planner
 serialization load. Other one-off topics can be added with repeated
 `--extra-topic /topic/name` arguments. Change the log root with
 `--output-root /path/to/logs` or the `FLIGHT_LOG_ROOT` environment variable.
+
+To include D400-series RGB and raw depth images, their camera-info/metadata,
+and the depth-to-color extrinsics, start the camera first and select the
+Realsense profile:
+
+```bash
+roslaunch realsense2_camera rs_camera.launch
+./home_shfiles/start_flight_record.sh rgbd_test --with-realsense
+```
+
+This profile requires `/camera/color/image_raw` and
+`/camera/depth/image_rect_raw`. Before rosbag starts, the recorder uses the
+camera's dynamic-reconfigure server to set `stereo_module/emitter_enabled=1`
+and a nonzero laser power (150 by default), verifies both image streams, and
+records the camera topics only when all checks pass. If the camera, emitter
+service, RGB stream, or depth stream is unavailable, it writes a WARN event,
+removes all Realsense topics from the rosbag command, and continues recording
+the core flight topics. Use `--realsense-namespace` for a non-default camera
+namespace and `--realsense-laser-power` only when the D400 hardware
+configuration requires a different tested value. The two raw 640 x 480, 30 Hz
+image streams are high bandwidth (about 166 GB/hour before compression), so
+verify USB, CPU, and disk margins before flight.
 
 Each run creates a timestamped directory under `~/flight_logs/`. It contains
 LZ4-compressed rosbag segments (split every 10 minutes or 2048 MB), an

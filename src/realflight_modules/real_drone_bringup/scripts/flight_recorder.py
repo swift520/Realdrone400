@@ -20,10 +20,11 @@ import time
 from pathlib import Path
 
 import rospy
+from dynamic_reconfigure.client import Client as DynamicReconfigureClient
 from mavros_msgs.msg import EstimatorStatus, ExtendedState, State, StatusText
 from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Log
-from sensor_msgs.msg import BatteryState, Imu
+from sensor_msgs.msg import BatteryState, Image, Imu
 from std_msgs.msg import Bool
 
 
@@ -60,6 +61,15 @@ CORE_TOPICS = (
 
 LIDAR_TOPICS = ("/livox/lidar",)
 REGISTERED_CLOUD_TOPICS = ("/cloud_registered",)
+REALSENSE_TOPIC_SUFFIXES = (
+    "color/image_raw",
+    "color/camera_info",
+    "color/metadata",
+    "depth/image_rect_raw",
+    "depth/camera_info",
+    "depth/metadata",
+    "extrinsics/depth_to_color",
+)
 
 STREAM_TIMEOUTS = {
     "localization_health": 0.25,
@@ -79,12 +89,29 @@ def sanitize_tag(tag):
     return cleaned.strip("._-")[:48]
 
 
-def build_topics(with_lidar=False, with_registered_cloud=False, extra_topics=None):
+def normalize_namespace(namespace):
+    cleaned = namespace.strip().strip("/")
+    return "/" + cleaned if cleaned else ""
+
+
+def namespaced_name(namespace, suffix):
+    return normalize_namespace(namespace) + "/" + suffix.strip("/")
+
+
+def build_realsense_topics(namespace="/camera"):
+    return tuple(namespaced_name(namespace, suffix)
+                 for suffix in REALSENSE_TOPIC_SUFFIXES)
+
+
+def build_topics(with_lidar=False, with_registered_cloud=False, extra_topics=None,
+                 with_realsense=False, realsense_namespace="/camera"):
     topics = list(CORE_TOPICS)
     if with_lidar:
         topics.extend(LIDAR_TOPICS)
     if with_registered_cloud:
         topics.extend(REGISTERED_CLOUD_TOPICS)
+    if with_realsense:
+        topics.extend(build_realsense_topics(realsense_namespace))
     topics.extend(extra_topics or [])
 
     unique = []
@@ -97,6 +124,41 @@ def build_topics(with_lidar=False, with_registered_cloud=False, extra_topics=Non
             seen.add(normalized)
             unique.append(normalized)
     return unique
+
+
+def enable_realsense_emitter(server, laser_power, timeout,
+                             client_factory=None):
+    """Enable and verify the D400 infrared pattern projector."""
+    factory = client_factory or DynamicReconfigureClient
+    client = factory(server, timeout=timeout)
+    try:
+        descriptions = client.get_parameter_descriptions(timeout=timeout)
+        if descriptions is None:
+            raise RuntimeError("timed out waiting for dynamic parameter descriptions")
+        available = {description.get("name") for description in descriptions}
+        required = {"emitter_enabled", "laser_power"}
+        missing = sorted(required - available)
+        if missing:
+            raise RuntimeError("missing Realsense parameters: {}".format(
+                ", ".join(missing)))
+
+        configuration = client.update_configuration({
+            "emitter_enabled": 1,
+            "laser_power": laser_power,
+        })
+        emitter_value = configuration.get("emitter_enabled")
+        configured_laser_power = configuration.get("laser_power")
+        if emitter_value is None or int(emitter_value) != 1:
+            raise RuntimeError("emitter verification returned {!r}".format(emitter_value))
+        if configured_laser_power is None or float(configured_laser_power) <= 0.0:
+            raise RuntimeError("laser-power verification returned {!r}".format(
+                configured_laser_power))
+        return {
+            "emitter_enabled": int(emitter_value),
+            "laser_power": float(configured_laser_power),
+        }
+    finally:
+        client.close()
 
 
 def create_session_dir(root, tag, now=None):
@@ -177,12 +239,15 @@ class FlightRecorder:
     def __init__(self, args, session_dir, topics, workspace):
         self.args = args
         self.session_dir = Path(session_dir)
-        self.topics = topics
+        self.topics = list(topics)
         self.workspace = workspace
         self.events = EventWriter(self.session_dir / "events.csv")
         self.edges = EdgeTracker()
         self.stream_receive_times = {}
         self.stream_stale = {}
+        self.stream_timeouts = dict(STREAM_TIMEOUTS)
+        self.realsense_active = False
+        self.realsense_topics = set(build_realsense_topics(args.realsense_namespace))
         self.start_monotonic = time.monotonic()
         self.last_disk_check = 0.0
         self.last_rosout = {}
@@ -200,9 +265,13 @@ class FlightRecorder:
             "hostname": platform.node(),
             "platform": platform.platform(),
             "workspace": str(workspace) if workspace else "",
-            "topics": topics,
+            "topics": list(self.topics),
             "with_lidar": args.with_lidar,
             "with_registered_cloud": args.with_registered_cloud,
+            "with_realsense_requested": args.with_realsense,
+            "with_realsense": False,
+            "realsense_namespace": normalize_namespace(args.realsense_namespace),
+            "realsense_laser_power_requested": args.realsense_laser_power,
             "compression": not args.no_compression,
             "split_duration": args.split_duration,
             "split_size_mb": args.split_size_mb,
@@ -212,6 +281,8 @@ class FlightRecorder:
 
     def start(self):
         self.events.write("INFO", "session_start", str(self.session_dir))
+        if self.args.with_realsense:
+            self._prepare_realsense()
         self._start_bag()
         self._subscribe_events()
         self.metadata_thread = threading.Thread(target=self._capture_metadata, daemon=True)
@@ -260,6 +331,67 @@ class FlightRecorder:
                 "rosbag exited during startup with code {}; see {}".format(
                     return_code, self.session_dir / "rosbag.log"))
 
+    def _prepare_realsense(self):
+        namespace = normalize_namespace(self.args.realsense_namespace)
+        # This wrapper registers sensor options on its public camera NodeHandle,
+        # so the D400 service is /<camera namespace>/stereo_module rather than
+        # below the realsense2_camera node's private namespace.
+        server = namespaced_name(namespace, "stereo_module")
+        self.events.write("INFO", "realsense_emitter_configuring", server)
+        try:
+            configured = enable_realsense_emitter(
+                server,
+                self.args.realsense_laser_power,
+                self.args.realsense_timeout,
+            )
+            self.metadata["realsense_emitter"] = {
+                "server": server,
+                **configured,
+            }
+            self.events.write(
+                "INFO", "realsense_emitter_enabled",
+                "server={} laser_power={:.1f}".format(
+                    server, configured["laser_power"]),
+            )
+
+            image_topics = (
+                (namespaced_name(namespace, "color/image_raw"), "RGB"),
+                (namespaced_name(namespace, "depth/image_rect_raw"), "depth"),
+            )
+            for topic, label in image_topics:
+                rospy.wait_for_message(topic, Image, timeout=self.args.realsense_timeout)
+                self.events.write("INFO", "realsense_stream_ready",
+                                  "{} {}".format(label, topic))
+            self.realsense_active = True
+            self.stream_timeouts.update({
+                "realsense_color": 0.50,
+                "realsense_depth": 0.50,
+            })
+            self.metadata["with_realsense"] = True
+            self.metadata["realsense_streams_ready"] = True
+            self._write_metadata()
+        except Exception as error:
+            self._continue_without_realsense(error)
+            rospy.logwarn(
+                "Realsense unavailable; continuing the core flight recording without "
+                "camera topics: %s", error)
+
+    def _continue_without_realsense(self, error):
+        self.realsense_active = False
+        self.topics = [topic for topic in self.topics
+                       if topic not in self.realsense_topics]
+        self.stream_timeouts.pop("realsense_color", None)
+        self.stream_timeouts.pop("realsense_depth", None)
+        self.metadata["topics"] = list(self.topics)
+        self.metadata["with_realsense"] = False
+        self.metadata["realsense_streams_ready"] = False
+        self.metadata["realsense_error"] = str(error)
+        self._write_metadata()
+        self.events.write(
+            "WARN", "realsense_unavailable",
+            "{}; continuing without Realsense topics".format(error),
+        )
+
     def _subscribe_events(self):
         hints = {"queue_size": 20, "tcp_nodelay": True}
         self.subscribers.extend((
@@ -286,6 +418,16 @@ class FlightRecorder:
             rospy.Subscriber("/livox/imu", Imu,
                              lambda _msg: self._mark_stream("livox_imu"), **hints),
         ))
+        if self.realsense_active:
+            namespace = normalize_namespace(self.args.realsense_namespace)
+            self.subscribers.extend((
+                # Metadata is emitted with each frame and avoids deserializing both
+                # high-bandwidth images a second time in this supervisor process.
+                rospy.Subscriber(namespaced_name(namespace, "color/metadata"), rospy.AnyMsg,
+                                 lambda _msg: self._mark_stream("realsense_color"), **hints),
+                rospy.Subscriber(namespaced_name(namespace, "depth/metadata"), rospy.AnyMsg,
+                                 lambda _msg: self._mark_stream("realsense_depth"), **hints),
+            ))
 
     def _mark_stream(self, name):
         self.stream_receive_times[name] = time.monotonic()
@@ -377,7 +519,7 @@ class FlightRecorder:
 
         now = time.monotonic()
         if now - self.start_monotonic >= self.args.startup_grace:
-            for name, timeout in STREAM_TIMEOUTS.items():
+            for name, timeout in self.stream_timeouts.items():
                 received = self.stream_receive_times.get(name)
                 stale = received is None or now - received >= timeout
                 if self.stream_stale.get(name) != stale:
@@ -534,6 +676,14 @@ def parse_args(argv):
                         help="also record /livox/lidar (roughly 14+ GB/hour)")
     parser.add_argument("--with-registered-cloud", action="store_true",
                         help="also record /cloud_registered (large and adds planner CPU load)")
+    parser.add_argument("--with-realsense", action="store_true",
+                        help="record Realsense RGB/depth when available and enable its IR emitter")
+    parser.add_argument("--realsense-namespace", default="/camera",
+                        help="Realsense topic namespace (default: /camera)")
+    parser.add_argument("--realsense-laser-power", type=float, default=150.0,
+                        help="structured-light laser power requested from the D400 driver")
+    parser.add_argument("--realsense-timeout", type=float, default=8.0,
+                        help="seconds to wait for emitter control and each image stream")
     parser.add_argument("--extra-topic", action="append", default=[])
     parser.add_argument("--split-duration", default="10m")
     parser.add_argument("--split-size-mb", type=int, default=2048)
@@ -552,6 +702,10 @@ def parse_args(argv):
         parser.error("split size and buffer size must be positive")
     if args.min_start_free_gb < 0.0 or args.runtime_warn_free_gb < 0.0:
         parser.error("disk thresholds must be non-negative")
+    if args.realsense_laser_power <= 0.0:
+        parser.error("Realsense laser power must be positive")
+    if args.realsense_timeout <= 0.0:
+        parser.error("Realsense timeout must be positive")
     return args
 
 
@@ -586,13 +740,29 @@ def acquire_instance_lock(root):
 def main(argv=None):
     cli_args = rospy.myargv(argv=sys.argv if argv is None else argv)[1:]
     args = parse_args(cli_args)
-    topics = build_topics(args.with_lidar, args.with_registered_cloud, args.extra_topic)
+    topics = build_topics(
+        args.with_lidar,
+        args.with_registered_cloud,
+        args.extra_topic,
+        with_realsense=args.with_realsense,
+        realsense_namespace=args.realsense_namespace,
+    )
     if args.dry_run:
+        profiles = ["compact"]
+        if args.with_lidar:
+            profiles.append("raw_lidar")
+        if args.with_registered_cloud:
+            profiles.append("registered_cloud")
+        if args.with_realsense:
+            profiles.append("realsense_rgbd")
         print(json.dumps({
             "output_root": str(Path(args.output_root).expanduser()),
             "tag": sanitize_tag(args.tag),
             "topics": topics,
-            "estimated_profile": "raw_lidar" if args.with_lidar else "compact",
+            "estimated_profile": " + ".join(profiles),
+            "realsense_requested": args.with_realsense,
+            "realsense_unavailable_policy": "continue_without_camera",
+            "realsense_laser_power": args.realsense_laser_power,
         }, indent=2))
         return 0
 
@@ -611,7 +781,15 @@ def main(argv=None):
         rospy.on_shutdown(recorder.shutdown)
         recorder.start()
 
-        profile = "compact + raw LiDAR" if args.with_lidar else "compact"
+        profile = "compact"
+        if args.with_lidar:
+            profile += " + raw LiDAR"
+        if args.with_registered_cloud:
+            profile += " + registered cloud"
+        if recorder.realsense_active:
+            profile += " + Realsense RGB-D"
+        elif args.with_realsense:
+            profile += " + Realsense unavailable (core topics only)"
         rospy.loginfo("Flight recorder ACTIVE (%s). Output: %s", profile, session_dir)
         rospy.loginfo("Land and disarm before Ctrl-C; wait for rosbag indexing to finish.")
         while not rospy.is_shutdown():

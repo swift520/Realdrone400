@@ -52,12 +52,17 @@ generate_messages(
 # =========================
 if(NOT WIN32)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(REALSENSE2 REQUIRED realsense2)
+    # Link through pkg-config's imported target so headers and the resolved
+    # library come from the same installation.  Using only
+    # REALSENSE2_LIBRARIES ("realsense2") let the linker silently fall back to
+    # an older system library when a vendor .pc file had a bad architecture
+    # libdir, producing a runtime API-version mismatch.
+    pkg_check_modules(REALSENSE2 REQUIRED IMPORTED_TARGET realsense2)
 
     message(STATUS "Using RealSense via pkg-config")
     message(STATUS "  RealSense version : ${REALSENSE2_VERSION}")
     message(STATUS "  RealSense include : ${REALSENSE2_INCLUDE_DIRS}")
-    message(STATUS "  RealSense libs    : ${REALSENSE2_LIBRARIES}")
+    message(STATUS "  RealSense libs    : ${REALSENSE2_LINK_LIBRARIES}")
 endif()
 
 # =========================
@@ -124,7 +129,7 @@ target_include_directories(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME}
     ${catkin_LIBRARIES}
-    ${REALSENSE2_LIBRARIES}
+    PkgConfig::REALSENSE2
     ${CMAKE_THREAD_LIBS_INIT}
 )
 

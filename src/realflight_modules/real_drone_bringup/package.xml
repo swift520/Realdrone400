@@ -21,6 +21,7 @@
 
   <exec_depend>mavros</exec_depend>
   <exec_depend>mavros_extras</exec_depend>
+  <exec_depend>dynamic_reconfigure</exec_depend>
   <exec_depend>rosbag</exec_depend>
   <exec_depend>roslaunch</exec_depend>
   <exec_depend>rosnode</exec_depend>

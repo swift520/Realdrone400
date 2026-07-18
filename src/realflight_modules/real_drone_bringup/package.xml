@@ -10,14 +10,23 @@
   <buildtool_depend>catkin</buildtool_depend>
 
   <depend>geometry_msgs</depend>
+  <depend>mavros_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>roscpp</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
 
   <exec_depend>mavros</exec_depend>
   <exec_depend>mavros_extras</exec_depend>
+  <exec_depend>rosbag</exec_depend>
   <exec_depend>roslaunch</exec_depend>
+  <exec_depend>rosnode</exec_depend>
+  <exec_depend>rosparam</exec_depend>
+  <exec_depend>rosservice</exec_depend>
+  <exec_depend>rostopic</exec_depend>
 
   <test_depend>rospy</test_depend>
   <test_depend>rostest</test_depend>

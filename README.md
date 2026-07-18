@@ -126,6 +126,19 @@ rosservice call /vision_pose_node/reset_fault
 px4ctrl 会停止位置控制、请求配置的非 OFFBOARD 模式，并只在最多 0.30 秒内发送
 有界的交接 setpoint；随后完全停流，由 PX4 自身的 offboard-loss 策略接管。即使
 定位随后恢复，也必须先确认退出 OFFBOARD、落地上锁，再重新发送起飞命令。
+
+试飞时，建议在定位正常后、启动 px4ctrl 和解锁之前另开终端开始记录：
+
+```bash
+./home_shfiles/start_flight_record.sh hover_01
+```
+
+默认只记录定位、控制、MAVROS/PX4 状态和诊断等关键数据。若需要离线重放
+FAST-LIO，再添加 `--with-lidar`；这会显著增加磁盘写入量。落地并上锁后按
+`Ctrl+C`，看到保存路径且目录内不再有 `.active` 文件后再断电。日志默认保存在
+`~/flight_logs/`，完整选项和故障恢复方法见
+`src/realflight_modules/real_drone_bringup/README.md`。
+
 如果飞机螺旋桨开始旋转，但无法起飞，说明hover_percent参数过小；如果飞机有明显飞过1米高，再下降的样子，说明hover_percent参数过大；
 遥控器此时可以以类似大疆飞机的操作逻辑对无人机进行位置控制；
 ```

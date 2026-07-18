@@ -142,3 +142,55 @@ ROS ENU/FLU to PX4 NED/FRD conversion.
 
 Do not run either launch file alongside another MAVROS instance or another
 node publishing the same external-vision pose topic.
+
+## Flight recorder
+
+Start the recorder in its own terminal after the sensors and localization are
+healthy, but before starting px4ctrl, entering OFFBOARD, or arming:
+
+```bash
+./home_shfiles/start_flight_record.sh hover_01
+```
+
+The default compact profile records the FAST-LIO IMU and odometry streams, the
+validated localization health/output, px4ctrl commands and debug output,
+MAVROS/PX4 state and estimator information, TF, diagnostics, and aggregated ROS
+warnings. Raw LiDAR, registered point clouds, maps, and images are deliberately
+excluded to keep CPU, disk bandwidth, and log size predictable.
+
+When a test must support full FAST-LIO replay, opt in to the raw Livox stream:
+
+```bash
+./home_shfiles/start_flight_record.sh localization_test --with-lidar
+```
+
+Raw LiDAR can consume roughly 14 GB/hour or more. The registered cloud is also
+available with `--with-registered-cloud`, but it is large and can add planner
+serialization load. Other one-off topics can be added with repeated
+`--extra-topic /topic/name` arguments. Change the log root with
+`--output-root /path/to/logs` or the `FLIGHT_LOG_ROOT` environment variable.
+
+Each run creates a timestamped directory under `~/flight_logs/`. It contains
+LZ4-compressed rosbag segments (split every 10 minutes or 2048 MB), an
+event-only `events.csv`, the exact rosbag command, ROS/PX4 parameter dumps,
+node/topic/service lists, Git revision/status, and disk/session metadata. The
+recorder refuses a second concurrent instance and requires 8 GiB free at
+startup; rosbag stops before free space falls below 5 GiB.
+
+After landing and disarming, press `Ctrl+C` once and wait for the final
+`Flight log saved to:` line. Do not power off while a `.bag.active` file is
+present. After an unexpected power loss, recover each active file with:
+
+```bash
+cd /path/to/session
+for file in *.bag.active; do
+  rosbag reindex "$file" && mv -- "$file" "${file%.active}"
+done
+```
+
+`rosbag reindex` preserves the original as `*.bag.orig.active`; keep that
+backup until the recovered `.bag` has been checked.
+
+The ROS recording does not replace the PX4 SD-card ULog. Export the matching
+`.ulg` after every flight when investigating EKF external-vision fusion,
+innovations, or PX4 failsafes.

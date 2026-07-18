@@ -101,14 +101,31 @@ dfu-util -a 0 --dfuse-address 0x08000000 -D ./holybro_kakuteh7mini_bootloader/ho
 ```
 sh start_sensor.sh；
 sh start_mapping.sh；
-rostopic echo /Odom_high_freq；
+rostopic hz /Odometry；
+rostopic hz /localization/validated_odom；
+rostopic echo -n 1 /localization/healthy；
 ```
-拿起飞机进行缓慢的小范围晃动，放回原地后确认没有太大误差；
+必须确认 `/Odometry` 持续刷新、`/localization/validated_odom` 持续刷新且
+`/localization/healthy` 为 `true`。单看 `/Odom_high_freq` 不够，因为它在没有
+激光修正时仍可能由 IMU 传播。拿起飞机进行缓慢的小范围晃动，放回原地后确认
+没有太大误差；
 遥控器5通道拨到内侧，6通道拨到下侧，油门打到中位；
 ```
 sh start_run_ctrl.sh；
 sh start_takeoff.sh;
 ```
+px4ctrl 启动后还会要求健康心跳连续至少 0.5 秒。若起飞命令过早而被拒绝，确认
+上述三项和终端错误信息后，再重新发送一次起飞命令。定位故障会锁存；查明原因、
+两路里程计恢复且飞机已经落地上锁后，执行：
+```
+rosservice call /vision_pose_node/reset_fault
+```
+等待健康重新变为 `true` 后才能再次进入 OFFBOARD。
+进入 OFFBOARD 前，px4ctrl 会先发送至少 1 秒定点 setpoint，并等待 PX4 的真实模式
+反馈后才允许解锁。飞行中健康心跳、有效里程计、IMU 或 MAVROS 状态任一超时，
+px4ctrl 会停止位置控制、请求配置的非 OFFBOARD 模式，并只在最多 0.30 秒内发送
+有界的交接 setpoint；随后完全停流，由 PX4 自身的 offboard-loss 策略接管。即使
+定位随后恢复，也必须先确认退出 OFFBOARD、落地上锁，再重新发送起飞命令。
 如果飞机螺旋桨开始旋转，但无法起飞，说明hover_percent参数过小；如果飞机有明显飞过1米高，再下降的样子，说明hover_percent参数过大；
 遥控器此时可以以类似大疆飞机的操作逻辑对无人机进行位置控制；
 ```
@@ -128,7 +145,9 @@ sh start_land.sh
 ```
 sh start_sensor.sh；
 sh start_mapping.sh；
-rostopic echo /Odom_high_freq；
+rostopic hz /Odometry；
+rostopic hz /localization/validated_odom；
+rostopic echo -n 1 /localization/healthy；
 ```
 2.启动Ego-Planner与Rviz
 ```
@@ -141,6 +160,14 @@ sh start_run_ctrl.sh；
 sh start_takeoff.sh;
 ```
 按下G键加鼠标左键点选目标点使无人机飞行。
+
+### 上桨前 PX4 保护检查
+
+仓库里的 ROS 健康门控不能替代 PX4 自身保护。必须先拆除螺旋桨，在实际使用的
+PX4 1.14 固件上确认：外部视觉已被 EKF 融合、水平/垂直位置有效；`ALTCTL` 与
+配置的无遥控回退模式确实可切入；以及 `COM_OF_LOSS_T`、`COM_OBL_RC_ACT` 和
+位置丢失动作在停止 OFFBOARD setpoint 后符合预期。仓库所附旧参数文件中的
+offboard-loss 动作可能仍依赖位置，未经台架验证不得实飞。
 
 4.任务完成后使用自动降落
 ```

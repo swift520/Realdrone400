@@ -22,7 +22,14 @@ struct Desired_State_t
 	double yaw;
 	double yaw_rate;
 
-	Desired_State_t(){};
+	Desired_State_t()
+		: p(Eigen::Vector3d::Zero()),
+		  v(Eigen::Vector3d::Zero()),
+		  a(Eigen::Vector3d::Zero()),
+		  j(Eigen::Vector3d::Zero()),
+		  q(Eigen::Quaterniond::Identity()),
+		  yaw(0.0),
+		  yaw_rate(0.0){};
 
 	Desired_State_t(Odom_Data_t &odom)
 		: p(odom.p),
@@ -38,13 +45,13 @@ struct Controller_Output_t
 {
 
 	// Orientation of the body frame with respect to the world frame
-	Eigen::Quaterniond q;
+	Eigen::Quaterniond q{Eigen::Quaterniond::Identity()};
 
 	// Body rates in body frame
-	Eigen::Vector3d bodyrates; // [rad/s]
+	Eigen::Vector3d bodyrates{Eigen::Vector3d::Zero()}; // [rad/s]
 
 	// Collective mass normalized thrust
-	double thrust;
+	double thrust{0.0};
 
 	//Eigen::Vector3d des_v_real;
 };

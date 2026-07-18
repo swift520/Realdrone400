@@ -50,6 +50,7 @@ public:
   {
     private_nh_.param("publish_rate", publish_rate_, 50.0);
     private_nh_.param("watchdog_rate", watchdog_rate_, 100.0);
+    private_nh_.param("health_publish_rate", health_publish_rate_, 20.0);
     private_nh_.param("high_rate_timeout", high_rate_timeout_, 0.15);
     private_nh_.param("correction_timeout", correction_timeout_, 0.50);
     private_nh_.param("recovery_duration", recovery_duration_, 1.0);
@@ -87,6 +88,7 @@ public:
         "odom_correction", 1, &VisionPoseBridge::correctionCallback, this, transport_hints);
 
     vision_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("mavros/vision_pose/pose", 1);
+    validated_odom_pub_ = nh_.advertise<nav_msgs::Odometry>("localization/validated_odom", 1);
     health_pub_ = nh_.advertise<std_msgs::Bool>("localization/healthy", 1, true);
     reset_service_ = private_nh_.advertiseService("reset_fault", &VisionPoseBridge::resetFault, this);
 
@@ -94,6 +96,9 @@ public:
         ros::WallDuration(1.0 / watchdog_rate_), &VisionPoseBridge::watchdogCallback, this);
     publish_timer_ = nh_.createSteadyTimer(
         ros::WallDuration(1.0 / publish_rate_), &VisionPoseBridge::publishCallback, this);
+    health_timer_ = nh_.createSteadyTimer(
+        ros::WallDuration(1.0 / health_publish_rate_),
+        &VisionPoseBridge::healthHeartbeatCallback, this);
 
     publishHealth(false, true);
     ROS_INFO("Applying body-to-FAST-LIO-sensor translation [%.3f, %.3f, %.3f] m; "
@@ -114,7 +119,8 @@ private:
   void validateParameters() const
   {
     const double numeric_parameters[] = {
-        publish_rate_, watchdog_rate_, high_rate_timeout_, correction_timeout_, recovery_duration_,
+        publish_rate_, watchdog_rate_, health_publish_rate_, high_rate_timeout_,
+        correction_timeout_, recovery_duration_,
         max_input_age_, max_future_stamp_, max_timestamp_skew_, quaternion_norm_tolerance_,
         max_active_position_jump_, max_active_orientation_jump_, max_recovery_position_jump_,
         max_recovery_orientation_jump_, max_stream_position_difference_,
@@ -128,7 +134,8 @@ private:
       }
     }
 
-    if (publish_rate_ <= 0.0 || watchdog_rate_ <= 0.0 || high_rate_timeout_ <= 0.0 ||
+    if (publish_rate_ <= 0.0 || watchdog_rate_ <= 0.0 || health_publish_rate_ <= 0.0 ||
+        high_rate_timeout_ <= 0.0 ||
         correction_timeout_ <= 0.0 ||
         recovery_duration_ < 0.0 || min_recovery_high_rate_samples_ < 1 ||
         min_recovery_corrections_ < 1 || quaternion_norm_tolerance_ <= 0.0 ||
@@ -176,9 +183,14 @@ private:
 
     const auto &position = msg.pose.pose.position;
     const auto &orientation = msg.pose.pose.orientation;
+    const auto &linear_velocity = msg.twist.twist.linear;
+    const auto &angular_velocity = msg.twist.twist.angular;
     if (!isFinite(position.x) || !isFinite(position.y) || !isFinite(position.z) ||
         !isFinite(orientation.x) || !isFinite(orientation.y) || !isFinite(orientation.z) ||
-        !isFinite(orientation.w))
+        !isFinite(orientation.w) ||
+        !isFinite(linear_velocity.x) || !isFinite(linear_velocity.y) ||
+        !isFinite(linear_velocity.z) || !isFinite(angular_velocity.x) ||
+        !isFinite(angular_velocity.y) || !isFinite(angular_velocity.z))
     {
       ROS_ERROR_THROTTLE(1.0, "%s odometry contains NaN or Inf; sample rejected.", stream_name);
       return false;
@@ -257,6 +269,43 @@ private:
     pose.position.x -= world_offset_x;
     pose.position.y -= world_offset_y;
     pose.position.z -= world_offset_z;
+  }
+
+  void transformSensorVelocityToBodyVelocity(nav_msgs::Odometry &odom) const
+  {
+    // This FAST-LIO fork stores linear velocity in world coordinates and
+    // angular velocity in aligned sensor/body coordinates.  For r_BS from the
+    // body origin to the sensor origin:
+    //   v_WB = v_WS - R_WS * (omega_S x r_BS).
+    const auto &q = odom.pose.pose.orientation;
+    const auto &omega = odom.twist.twist.angular;
+    const double cross_x = omega.y * body_to_sensor_z_ - omega.z * body_to_sensor_y_;
+    const double cross_y = omega.z * body_to_sensor_x_ - omega.x * body_to_sensor_z_;
+    const double cross_z = omega.x * body_to_sensor_y_ - omega.y * body_to_sensor_x_;
+
+    const double xx = q.x * q.x;
+    const double yy = q.y * q.y;
+    const double zz = q.z * q.z;
+    const double xy = q.x * q.y;
+    const double xz = q.x * q.z;
+    const double yz = q.y * q.z;
+    const double wx = q.w * q.x;
+    const double wy = q.w * q.y;
+    const double wz = q.w * q.z;
+
+    const double world_cross_x =
+        (1.0 - 2.0 * (yy + zz)) * cross_x +
+        2.0 * (xy - wz) * cross_y + 2.0 * (xz + wy) * cross_z;
+    const double world_cross_y =
+        2.0 * (xy + wz) * cross_x +
+        (1.0 - 2.0 * (xx + zz)) * cross_y + 2.0 * (yz - wx) * cross_z;
+    const double world_cross_z =
+        2.0 * (xz - wy) * cross_x + 2.0 * (yz + wx) * cross_y +
+        (1.0 - 2.0 * (xx + yy)) * cross_z;
+
+    odom.twist.twist.linear.x -= world_cross_x;
+    odom.twist.twist.linear.y -= world_cross_y;
+    odom.twist.twist.linear.z -= world_cross_z;
   }
 
   void handleGapBeforeUpdate(const ros::SteadyTime &now, const ros::SteadyTime &last_receive,
@@ -455,9 +504,12 @@ private:
     nav_msgs::Odometry candidate = *msg;
     normalizePose(candidate.pose.pose);
     transformSensorPoseToBodyPose(candidate.pose.pose);
+    transformSensorVelocityToBodyVelocity(candidate);
+    candidate.child_frame_id = "body";
     if (state_ == State::ACTIVE && activePoseJumped(candidate.pose.pose))
     {
       latchFault("high-rate pose jump exceeded the configured limit");
+      return;
     }
     if (!recoveryPoseSampleIsContinuous(candidate.pose.pose))
     {
@@ -473,6 +525,14 @@ private:
     }
 
     maybeStartRecovery(now);
+
+    // px4ctrl consumes only this checked, body-origin odometry. Publishing it
+    // from the callback that accepted the sample prevents a finite pose jump
+    // from racing ahead of the separate health Bool.
+    if (state_ == State::ACTIVE && streamsFresh(now))
+    {
+      validated_odom_pub_.publish(candidate);
+    }
   }
 
   void correctionCallback(const nav_msgs::Odometry::ConstPtr &msg)
@@ -672,6 +732,13 @@ private:
     last_published_pose_valid_ = true;
   }
 
+  void healthHeartbeatCallback(const ros::SteadyTimerEvent &)
+  {
+    // Repeating the latched value lets downstream consumers distinguish an
+    // ACTIVE bridge from a dead process whose final latched message was true.
+    publishHealth(state_ == State::ACTIVE, true);
+  }
+
   void enterWaiting(const std::string &reason)
   {
     state_ = State::WAITING;
@@ -763,10 +830,12 @@ private:
   ros::Subscriber high_rate_sub_;
   ros::Subscriber correction_sub_;
   ros::Publisher vision_pose_pub_;
+  ros::Publisher validated_odom_pub_;
   ros::Publisher health_pub_;
   ros::ServiceServer reset_service_;
   ros::SteadyTimer watchdog_timer_;
   ros::SteadyTimer publish_timer_;
+  ros::SteadyTimer health_timer_;
 
   State state_{State::WAITING};
   bool recovering_after_fault_{false};
@@ -798,6 +867,7 @@ private:
 
   double publish_rate_{50.0};
   double watchdog_rate_{100.0};
+  double health_publish_rate_{20.0};
   double high_rate_timeout_{0.15};
   double correction_timeout_{0.50};
   double recovery_duration_{1.0};

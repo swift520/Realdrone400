@@ -4,7 +4,8 @@
         	<!-- <remap from="~odom" to="/vicon_imu_ekf_odom" /> -->
 			
 			<!-- <remap from="~odom" to="/vins_fusion/imu_propagate" /> -->
-      <remap from="~odom" to="/Odom_high_freq" />
+      <remap from="~odom" to="/localization/validated_odom" />
+		<remap from="~localization_health" to="/localization/healthy" />
 
 		<remap from="~cmd" to="/position_cmd" />
 

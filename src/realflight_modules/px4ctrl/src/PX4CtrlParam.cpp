@@ -1,5 +1,8 @@
 #include "PX4CtrlParam.h"
 
+#include <cmath>
+#include <stdexcept>
+
 Parameter_t::Parameter_t()
 {
 }
@@ -29,6 +32,19 @@ void Parameter_t::config_from_ros_handle(const ros::NodeHandle &nh)
 	read_essential_param(nh, "msg_timeout/cmd", msg_timeout.cmd);
 	read_essential_param(nh, "msg_timeout/imu", msg_timeout.imu);
 	read_essential_param(nh, "msg_timeout/bat", msg_timeout.bat);
+	read_essential_param(nh, "msg_timeout/state", msg_timeout.state);
+	read_essential_param(nh, "msg_timeout/extended_state", msg_timeout.extended_state);
+
+	read_essential_param(nh, "localization_health/freshness_timeout", localization_health.freshness_timeout);
+	read_essential_param(nh, "localization_health/recovery_duration", localization_health.recovery_duration);
+	read_essential_param(nh, "localization_health/offboard_prestream_time", localization_health.offboard_prestream_time);
+	read_essential_param(nh, "localization_health/offboard_entry_timeout", localization_health.offboard_entry_timeout);
+	read_essential_param(nh, "localization_health/arm_confirmation_timeout", localization_health.arm_confirmation_timeout);
+	read_essential_param(nh, "localization_health/mode_retry_interval", localization_health.mode_retry_interval);
+	read_essential_param(nh, "localization_health/attitude_blend_time", localization_health.attitude_blend_time);
+	read_essential_param(nh, "localization_health/exit_stream_grace", localization_health.exit_stream_grace);
+	read_essential_param(nh, "localization_health/failsafe_mode_with_rc", localization_health.failsafe_mode_with_rc);
+	read_essential_param(nh, "localization_health/failsafe_mode_without_rc", localization_health.failsafe_mode_without_rc);
 
 	read_essential_param(nh, "pose_solver", pose_solver);
 	read_essential_param(nh, "mass", mass);
@@ -74,6 +90,33 @@ void Parameter_t::config_from_ros_handle(const ros::NodeHandle &nh)
 	if ( thr_map.print_val )
 	{
 		ROS_WARN("You should disable \"print_value\" if you are in regular usage.");
+	}
+
+	const LocalizationHealth &health = localization_health;
+	if (!std::isfinite(max_angle) ||
+		(max_angle >= 0.0 && max_angle >= M_PI_2) ||
+		!std::isfinite(msg_timeout.odom) || msg_timeout.odom <= 0.0 ||
+		!std::isfinite(msg_timeout.rc) || msg_timeout.rc <= 0.0 ||
+		!std::isfinite(msg_timeout.cmd) || msg_timeout.cmd <= 0.0 ||
+		!std::isfinite(msg_timeout.imu) || msg_timeout.imu <= 0.0 ||
+		!std::isfinite(msg_timeout.bat) || msg_timeout.bat <= 0.0 ||
+		!std::isfinite(msg_timeout.state) || msg_timeout.state <= 0.0 ||
+		!std::isfinite(msg_timeout.extended_state) || msg_timeout.extended_state <= 0.0 ||
+		!std::isfinite(health.freshness_timeout) || health.freshness_timeout <= 0.0 ||
+		!std::isfinite(health.recovery_duration) || health.recovery_duration < 0.0 ||
+		!std::isfinite(health.offboard_prestream_time) || health.offboard_prestream_time < 1.0 ||
+		!std::isfinite(health.offboard_entry_timeout) ||
+		health.offboard_entry_timeout <= health.offboard_prestream_time ||
+		!std::isfinite(health.arm_confirmation_timeout) || health.arm_confirmation_timeout <= 0.0 ||
+		!std::isfinite(health.mode_retry_interval) || health.mode_retry_interval <= 0.0 ||
+		!std::isfinite(health.attitude_blend_time) || health.attitude_blend_time < 0.0 ||
+		!std::isfinite(health.exit_stream_grace) || health.exit_stream_grace <= 0.0 ||
+		health.exit_stream_grace > 0.5 ||
+		health.attitude_blend_time > health.exit_stream_grace ||
+		health.failsafe_mode_with_rc.empty() || health.failsafe_mode_with_rc == "OFFBOARD" ||
+		health.failsafe_mode_without_rc.empty() || health.failsafe_mode_without_rc == "OFFBOARD")
+	{
+		throw std::runtime_error("invalid max_angle, localization_health, or msg_timeout parameters");
 	}
 };
 

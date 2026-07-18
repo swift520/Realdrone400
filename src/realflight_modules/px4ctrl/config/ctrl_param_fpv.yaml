@@ -66,3 +66,22 @@ msg_timeout:
     cmd:  0.5
     imu:  0.5
     bat:  0.5
+    state: 2.0
+    extended_state: 2.0
+
+# px4ctrl only enters OFFBOARD after a continuously fresh localization-health
+# heartbeat and a one-second setpoint prestream.  During a localization fault,
+# it requests the configured non-position mode while forwarding the last valid
+# control output for at most 0.30 s; after that PX4's offboard-loss policy owns
+# the response.  Verify COM_OF_LOSS_T/COM_OBL_RC_ACT on the actual FCU.
+localization_health:
+    freshness_timeout: 0.25
+    recovery_duration: 0.50
+    offboard_prestream_time: 1.0
+    offboard_entry_timeout: 4.0
+    arm_confirmation_timeout: 2.0
+    mode_retry_interval: 0.10
+    attitude_blend_time: 0.15
+    exit_stream_grace: 0.30
+    failsafe_mode_with_rc: "ALTCTL"
+    failsafe_mode_without_rc: "AUTO.LAND"

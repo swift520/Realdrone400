@@ -17,13 +17,17 @@ class VisionPoseWatchdogTest(unittest.TestCase):
     def setUp(self):
         self._lock = threading.Lock()
         self._outputs = []
+        self._validated_odom = []
         self._health = None
+        self._health_messages = []
         self._sent_high_stamps = set()
 
         self._high_pub = rospy.Publisher("/test/odom_high_rate", Odometry, queue_size=1)
         self._correction_pub = rospy.Publisher("/test/odom_correction", Odometry, queue_size=1)
         self._pose_sub = rospy.Subscriber("/test/vision_pose", PoseStamped, self._pose_callback,
                                           queue_size=100)
+        self._validated_sub = rospy.Subscriber("/test/validated_odom", Odometry,
+                                               self._validated_callback, queue_size=100)
         self._health_sub = rospy.Subscriber("/test/localization_healthy", Bool,
                                             self._health_callback, queue_size=10)
 
@@ -37,6 +41,7 @@ class VisionPoseWatchdogTest(unittest.TestCase):
             if (self._high_pub.get_num_connections() and
                     self._correction_pub.get_num_connections() and
                     self._pose_sub.get_num_connections() and
+                    self._validated_sub.get_num_connections() and
                     self._health_sub.get_num_connections()):
                 return
             rospy.sleep(0.02)
@@ -46,9 +51,18 @@ class VisionPoseWatchdogTest(unittest.TestCase):
         with self._lock:
             self._outputs.append((time.monotonic(), msg))
 
+    def _validated_callback(self, msg):
+        with self._lock:
+            self._validated_odom.append((time.monotonic(), msg))
+
     def _health_callback(self, msg):
         with self._lock:
             self._health = msg.data
+            self._health_messages.append((time.monotonic(), msg.data))
+
+    def _health_message_count(self):
+        with self._lock:
+            return len(self._health_messages)
 
     def _output_count(self):
         with self._lock:
@@ -57,6 +71,39 @@ class VisionPoseWatchdogTest(unittest.TestCase):
     def _latest_output(self):
         with self._lock:
             return self._outputs[-1][1] if self._outputs else None
+
+    def _latest_validated_odom(self):
+        with self._lock:
+            return self._validated_odom[-1][1] if self._validated_odom else None
+
+    def _validated_count(self):
+        with self._lock:
+            return len(self._validated_odom)
+
+    def _wait_for_validated_stamp(self, stamp, timeout=0.15):
+        deadline = time.monotonic() + timeout
+        stamp_nsec = stamp.to_nsec()
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
+            with self._lock:
+                for _, msg in self._validated_odom:
+                    if msg.header.stamp.to_nsec() == stamp_nsec:
+                        return msg
+            rospy.sleep(0.005)
+        return None
+
+    def _wait_for_validated_quiet(self, quiet_duration=0.08, timeout=0.60):
+        deadline = time.monotonic() + timeout
+        last_count = self._validated_count()
+        quiet_since = time.monotonic()
+        while not rospy.is_shutdown() and time.monotonic() < deadline:
+            current_count = self._validated_count()
+            if current_count != last_count:
+                last_count = current_count
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= quiet_duration:
+                return current_count
+            rospy.sleep(0.005)
+        self.fail("validated odometry did not become quiet")
 
     def _wait_for_output_stamp(self, stamp, timeout=0.15):
         deadline = time.monotonic() + timeout
@@ -151,13 +198,20 @@ class VisionPoseWatchdogTest(unittest.TestCase):
                          "bridge published during startup validation")
         self._publish_for(0.55, True, True)
         self.assertTrue(self._wait_for_health(True), "bridge did not become healthy")
+        health_count = self._health_message_count()
         self._publish_for(0.15, True, True)
+        self.assertGreaterEqual(self._health_message_count() - health_count, 2,
+                                "healthy state was not repeated as a liveness heartbeat")
         latest = self._latest_output()
         self.assertIsNotNone(latest)
         self.assertAlmostEqual(latest.pose.position.x, 1.25)
         self.assertAlmostEqual(latest.pose.position.y, 0.0)
         self.assertAlmostEqual(latest.pose.position.z, -0.10)
         self.assertEqual(latest.header.frame_id, "map")
+        validated = self._latest_validated_odom()
+        self.assertIsNotNone(validated, "validated odometry was not published for px4ctrl")
+        self.assertAlmostEqual(validated.pose.pose.position.x, 1.25)
+        self.assertAlmostEqual(validated.pose.pose.position.z, -0.10)
         self.assertIn(latest.header.stamp.to_nsec(), self._sent_high_stamps,
                       "output timestamp was not preserved from high-rate odometry")
         output_stamps = [msg.header.stamp.to_nsec() for msg in self._outputs_since(0)]
@@ -172,14 +226,26 @@ class VisionPoseWatchdogTest(unittest.TestCase):
         pitched = self._make_odom(pitched_stamp, 1.25, "world", "odom_imu")
         pitched.pose.pose.orientation.y = math.sin(0.5 * pitch)
         pitched.pose.pose.orientation.w = math.cos(0.5 * pitch)
+        pitched.twist.twist.linear.x = 1.0
+        pitched.twist.twist.linear.y = 2.0
+        pitched.twist.twist.linear.z = 3.0
+        pitched.twist.twist.angular.y = 1.0
         self._high_pub.publish(pitched)
         pitched_output = self._wait_for_output_stamp(pitched_stamp)
+        pitched_odom = self._wait_for_validated_stamp(pitched_stamp)
         self.assertIsNotNone(pitched_output, "pitched lever-arm sample was not forwarded")
+        self.assertIsNotNone(pitched_odom, "pitched sample was not forwarded to px4ctrl odometry")
         self.assertAlmostEqual(pitched_output.pose.position.x,
                                1.25 - 0.10 * math.sin(pitch), places=8)
         self.assertAlmostEqual(pitched_output.pose.position.y, 0.0, places=8)
         self.assertAlmostEqual(pitched_output.pose.position.z,
                                -0.10 * math.cos(pitch), places=8)
+        self.assertEqual(pitched_odom.child_frame_id, "body")
+        self.assertAlmostEqual(pitched_odom.twist.twist.linear.x,
+                               1.0 - 0.10 * math.cos(pitch), places=8)
+        self.assertAlmostEqual(pitched_odom.twist.twist.linear.y, 2.0, places=8)
+        self.assertAlmostEqual(pitched_odom.twist.twist.linear.z,
+                               3.0 + 0.10 * math.sin(pitch), places=8)
         self._publish_for(0.10, True, True)
         self.assertTrue(self._is_healthy(), "valid rotated lever arm caused a fault")
 
@@ -222,9 +288,12 @@ class VisionPoseWatchdogTest(unittest.TestCase):
         self._publish_for(0.55, True, False)
         self.assertTrue(self._wait_for_health(False), "correction timeout did not mark unhealthy")
         stopped_count = self._wait_for_output_quiet()
+        validated_stopped_count = self._wait_for_validated_quiet()
         self._publish_for(0.20, True, False)
         self.assertEqual(self._wait_for_output_quiet(), stopped_count,
                          "bridge published after correction watchdog expired")
+        self.assertEqual(self._wait_for_validated_quiet(), validated_stopped_count,
+                         "validated odometry continued while localization was unhealthy")
 
         # A reset must not reconnect a restarted estimator with a different origin.
         self._publish_for(0.12, True, True, high_x=2.0)

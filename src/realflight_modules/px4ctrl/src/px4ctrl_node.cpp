@@ -40,6 +40,14 @@ int main(int argc, char *argv[])
                                          ros::VoidConstPtr(),
                                          ros::TransportHints().tcpNoDelay());
 
+    ros::Subscriber localization_health_sub =
+        nh.subscribe<std_msgs::Bool>("localization_health",
+                                     1,
+                                     boost::bind(&LocalizationHealth_Data_t::feed_msg,
+                                                 &fsm.localization_health_data, _1),
+                                     ros::VoidConstPtr(),
+                                     ros::TransportHints().tcpNoDelay());
+
     ros::Subscriber cmd_sub =
         nh.subscribe<quadrotor_msgs::PositionCommand>("cmd",
                                                       100,
@@ -97,7 +105,7 @@ int main(int argc, char *argv[])
         while (ros::ok())
         {
             ros::spinOnce();
-            if (fsm.rc_is_received(ros::Time::now()))
+            if (fsm.rc_is_received(ros::SteadyTime::now()))
             {
                 ROS_INFO("[PX4CTRL] RC received.");
                 break;
@@ -110,8 +118,10 @@ int main(int argc, char *argv[])
     while (ros::ok() && !fsm.state_data.current_state.connected)
     {
         ros::spinOnce();
-        ros::Duration(1.0).sleep();
-        if (trials++ > 5)
+        if (fsm.state_data.current_state.connected)
+            break;
+        ros::WallDuration(0.1).sleep();
+        if (trials++ > 50)
             ROS_ERROR("Unable to connnect to PX4!!!");
     }
 

@@ -4,6 +4,7 @@
         name="vision_pose_node"
         output="screen">
     <param name="publish_rate" value="50.0" />
+    <param name="health_publish_rate" value="20.0" />
     <param name="high_rate_timeout" value="0.20" />
     <param name="correction_timeout" value="0.35" />
     <param name="recovery_duration" value="0.25" />
@@ -21,6 +22,7 @@
     <remap from="odom_high_rate" to="/test/odom_high_rate" />
     <remap from="odom_correction" to="/test/odom_correction" />
     <remap from="mavros/vision_pose/pose" to="/test/vision_pose" />
+    <remap from="localization/validated_odom" to="/test/validated_odom" />
     <remap from="localization/healthy" to="/test/localization_healthy" />
   </node>
 

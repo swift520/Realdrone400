@@ -5,11 +5,15 @@
        doc="LiDAR-corrected FAST-LIO odometry used as an independent health gate." />
   <arg name="vision_pose_topic" default="/mavros/vision_pose/pose"
        doc="MAVROS external-vision PoseStamped input." />
+  <arg name="validated_odom_topic" default="/localization/validated_odom"
+       doc="Validated body-origin odometry consumed by px4ctrl." />
   <arg name="health_topic" default="/localization/healthy"
-       doc="Latched Bool indicating whether PX4 output is active." />
+       doc="Latched heartbeat for validated localization source/bridge health; it does not prove PX4 EKF fusion." />
 
   <arg name="publish_rate" default="50.0" doc="Maximum PX4 output rate in Hz." />
   <arg name="watchdog_rate" default="100.0" doc="Independent safety-watchdog check rate in Hz." />
+  <arg name="health_publish_rate" default="20.0"
+       doc="Localization-health heartbeat rate consumed by px4ctrl." />
   <arg name="high_rate_timeout" default="0.15" doc="High-rate input timeout in seconds." />
   <arg name="correction_timeout" default="0.50" doc="LiDAR-correction timeout in seconds." />
   <arg name="recovery_duration" default="1.0" doc="Continuous validation time before output starts." />
@@ -59,10 +63,10 @@
   <node pkg="real_drone_bringup"
         type="vision_pose_node"
         name="vision_pose_node"
-        output="screen"
-        required="true">
+        output="screen">
     <param name="publish_rate" value="$(arg publish_rate)" />
     <param name="watchdog_rate" value="$(arg watchdog_rate)" />
+    <param name="health_publish_rate" value="$(arg health_publish_rate)" />
     <param name="high_rate_timeout" value="$(arg high_rate_timeout)" />
     <param name="correction_timeout" value="$(arg correction_timeout)" />
     <param name="recovery_duration" value="$(arg recovery_duration)" />
@@ -91,6 +95,7 @@
     <remap from="odom_high_rate" to="$(arg high_rate_odom_topic)" />
     <remap from="odom_correction" to="$(arg correction_odom_topic)" />
     <remap from="mavros/vision_pose/pose" to="$(arg vision_pose_topic)" />
+    <remap from="localization/validated_odom" to="$(arg validated_odom_topic)" />
     <remap from="localization/healthy" to="$(arg health_topic)" />
   </node>
 </launch>

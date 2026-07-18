@@ -3,6 +3,8 @@
   <arg name="gcs_url" default="" />
   <arg name="tgt_system" default="1" />
   <arg name="tgt_component" default="1" />
+  <arg name="enable_vision_bridge" default="true"
+       doc="Start the FAST-LIO external-vision bridge and localization-health heartbeat." />
 
   <!-- Start MAVROS for the onboard PX4 serial link. -->
   <include file="$(find mavros)/launch/px4.launch">
@@ -11,4 +13,8 @@
     <arg name="tgt_system" value="$(arg tgt_system)" />
     <arg name="tgt_component" value="$(arg tgt_component)" />
   </include>
+
+  <group if="$(arg enable_vision_bridge)">
+    <include file="$(find real_drone_bringup)/launch/takeoff_vrpn.launch" />
+  </group>
 </launch>

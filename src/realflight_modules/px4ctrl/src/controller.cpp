@@ -1,5 +1,8 @@
 #include "controller.h"
 
+#include <algorithm>
+#include <cmath>
+
 using namespace std;
 
 
@@ -34,14 +37,22 @@ LinearControl::calculateControl(const Desired_State_t &des,
       des_acc += Eigen::Vector3d(0,0,param_.gra);
 
       u.thrust = computeDesiredCollectiveThrustSignal(des_acc);
-      double roll,pitch,yaw,yaw_imu;
+      double roll, pitch;
       double yaw_odom = fromQuaternion2yaw(odom.q);
       double sin = std::sin(yaw_odom);
       double cos = std::cos(yaw_odom);
       roll = (des_acc(0) * sin - des_acc(1) * cos )/ param_.gra;
       pitch = (des_acc(0) * cos + des_acc(1) * sin )/ param_.gra;
-      // yaw = fromQuaternion2yaw(des.q);
-      yaw_imu = fromQuaternion2yaw(imu.q);
+      if (param_.max_angle >= 0.0)
+      {
+        const double requested_tilt = std::hypot(roll, pitch);
+        if (requested_tilt > param_.max_angle && requested_tilt > 0.0)
+        {
+          const double scale = param_.max_angle / requested_tilt;
+          roll *= scale;
+          pitch *= scale;
+        }
+      }
       // Eigen::Quaterniond q = Eigen::AngleAxisd(yaw,Eigen::Vector3d::UnitZ())
       //   * Eigen::AngleAxisd(roll,Eigen::Vector3d::UnitX())
       //   * Eigen::AngleAxisd(pitch,Eigen::Vector3d::UnitY());
@@ -148,7 +159,6 @@ LinearControl::resetThrustMapping(void)
   thr2acc_ = param_.gra / param_.thr_map.hover_percentage;
   P_ = 1e6;
 }
-
 
 
 

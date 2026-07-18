@@ -3,8 +3,11 @@
 This package contains the two hardware bringup functions migrated from the
 `LIO-Drone-250` workspace for use by `REAL_DRONE_400`.
 
-- `takeoff_px4.launch` starts MAVROS on `/dev/ttyTHS0:921600`. Despite its
-  historical name, it does not arm the vehicle or send a takeoff command.
+- `takeoff_px4.launch` starts MAVROS on `/dev/ttyTHS0:921600` and, by default,
+  includes the FAST-LIO vision/health bridge below. Despite its historical
+  name, it does not arm the vehicle or send a takeoff command. Set
+  `enable_vision_bridge:=false` only for maintenance where px4ctrl will not be
+  used.
 - `takeoff_vrpn.launch` keeps its historical name for script compatibility,
   but it does not use VRPN. It forwards fresh FAST-LIO high-rate poses to
   MAVROS and independently requires fresh LiDAR-corrected mapping odometry.
@@ -16,6 +19,9 @@ The bridge uses two FAST-LIO topics for different purposes:
 - `/Odom_high_freq`: high-rate IMU-propagated pose used as the output data.
 - `/Odometry`: LiDAR-corrected mapping pose used only as a correction-health
   watchdog.
+- `/localization/validated_odom`: checked, lever-arm-corrected high-rate
+  odometry published only while the bridge is ACTIVE; px4ctrl consumes this
+  instead of the raw FAST-LIO stream.
 
 The node publishes each high-rate measurement at most once, preserves its
 measurement timestamp, and limits output to 50 Hz by default. It never creates
@@ -40,13 +46,21 @@ from the same FAST-LIO state coordinates. The frame and cross-stream checks are
 intended to reject an accidental remap to an unrelated odometry topic.
 
 Health is published as a latched `std_msgs/Bool` on
-`/localization/healthy`. A fault does not automatically recover when data
+`/localization/healthy` and repeated at 20 Hz as a liveness heartbeat. This
+allows px4ctrl to reject a stale latched `true` if the bridge process dies. A
+fault does not automatically recover when data
 returns. Once the cause is understood and both streams are healthy, request a
 manual recovery check with:
 
 ```bash
 rosservice call /vision_pose_node/reset_fault
 ```
+
+The Bool describes the FAST-LIO sources and this bridge only. It does **not**
+prove that MAVROS delivered the pose or that the PX4 EKF accepted/fused
+external vision. Check PX4 estimator validity and innovation status separately
+before installing propellers. Keep the heartbeat period comfortably below the
+px4ctrl freshness timeout; the defaults are 0.05 s and 0.25 s respectively.
 
 This bridge does not arm, change flight mode, or issue a land command. Stopping
 fresh external-vision measurements lets PX4 EKF detect aiding loss; the
@@ -74,6 +88,14 @@ Default watchdog values assume approximately 50+ Hz high-rate odometry and
 Tune these only after measuring worst-case timing under real onboard load.
 FAST-LIO source stamps must use the same time base as the ROS host clock;
 otherwise the age check intentionally rejects them.
+
+The validated odometry keeps this fork's historical velocity convention:
+`twist.twist.linear` is in world coordinates because px4ctrl consumes it that
+way, while angular velocity is in the aligned body frame. The bridge applies
+the lever-arm velocity correction
+`v_WB = v_WS - R_WS * (omega_S x r_BS)` and labels the pose child frame
+`body`. Do not reinterpret the linear velocity as child-frame velocity without
+updating px4ctrl at the same time.
 
 The FAST-LIO high-rate predictor also rejects non-positive IMU intervals and
 intervals above `0.1 s`, and re-seeds its trapezoidal integration after every

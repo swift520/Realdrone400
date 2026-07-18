@@ -2,6 +2,7 @@
 #define __PX4CTRLPARAM_H
 
 #include <ros/ros.h>
+#include <string>
 
 class Parameter_t
 {
@@ -28,6 +29,22 @@ public:
 		double cmd;
 		double imu;
 		double bat;
+		double state;
+		double extended_state;
+	};
+
+	struct LocalizationHealth
+	{
+		double freshness_timeout;
+		double recovery_duration;
+		double offboard_prestream_time;
+		double offboard_entry_timeout;
+		double arm_confirmation_timeout;
+		double mode_retry_interval;
+		double attitude_blend_time;
+		double exit_stream_grace;
+		std::string failsafe_mode_with_rc;
+		std::string failsafe_mode_without_rc;
 	};
 
 	struct ThrustMapping
@@ -60,6 +77,7 @@ public:
 	Gain gain;
 	RotorDrag rt_drag;
 	MsgTimeout msg_timeout;
+	LocalizationHealth localization_health;
 	RCReverse rc_reverse;
 	ThrustMapping thr_map;
 	AutoTakeoffLand takeoff_land;

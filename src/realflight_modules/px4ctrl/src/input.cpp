@@ -1,11 +1,29 @@
 #include "input.h"
 
+#include <cmath>
+
+namespace
+{
+
+bool quaternionIsValid(const Eigen::Quaterniond &q)
+{
+    return q.coeffs().allFinite() && std::isfinite(q.norm()) &&
+           std::abs(q.norm() - 1.0) <= 0.10;
+}
+
+} // namespace
+
 RC_Data_t::RC_Data_t()
 {
     rcv_stamp = ros::Time(0);
+    rcv_steady_stamp = ros::SteadyTime();
 
     last_mode = -1.0;
     last_gear = -1.0;
+    last_reboot_cmd = -1.0;
+    mode = 0.0;
+    gear = 0.0;
+    reboot_cmd = 0.0;
 
     // Parameter initilation is very important in RC-Free usage!
     is_hover_mode = true;
@@ -23,6 +41,20 @@ void RC_Data_t::feed(mavros_msgs::RCInConstPtr pMsg)
 {
     msg = *pMsg;
     rcv_stamp = ros::Time::now();
+    rcv_steady_stamp = ros::SteadyTime::now();
+
+    if (msg.channels.size() < 8)
+    {
+        data_valid = false;
+        enter_hover_mode = false;
+        enter_command_mode = false;
+        toggle_reboot = false;
+        ROS_ERROR_THROTTLE(1.0, "RC message has %zu channels; at least 8 are required.",
+                           msg.channels.size());
+        return;
+    }
+
+    data_valid = true;
 
     for (int i = 0; i < 4; i++)
     {
@@ -100,26 +132,39 @@ void RC_Data_t::feed(mavros_msgs::RCInConstPtr pMsg)
 
 void RC_Data_t::check_validity()
 {
-    if (mode >= -1.1 && mode <= 1.1 && gear >= -1.1 && gear <= 1.1 && reboot_cmd >= -1.1 && reboot_cmd <= 1.1)
+    const bool sticks_valid =
+        std::abs(ch[0]) <= 1.1 && std::abs(ch[1]) <= 1.1 &&
+        std::abs(ch[2]) <= 1.1 && std::abs(ch[3]) <= 1.1;
+    if (sticks_valid && mode >= -1.1 && mode <= 1.1 &&
+        gear >= -1.1 && gear <= 1.1 &&
+        reboot_cmd >= -1.1 && reboot_cmd <= 1.1)
     {
         // pass
     }
     else
     {
-        ROS_ERROR("RC data validity check fail. mode=%f, gear=%f, reboot_cmd=%f", mode, gear, reboot_cmd);
+        data_valid = false;
+        ROS_ERROR("RC data validity check fail. sticks=[%f, %f, %f, %f], "
+                  "mode=%f, gear=%f, reboot_cmd=%f",
+                  ch[0], ch[1], ch[2], ch[3], mode, gear, reboot_cmd);
     }
 }
 
 bool RC_Data_t::check_centered()
 {
-    bool centered = abs(ch[0]) < 1e-5 && abs(ch[0]) < 1e-5 && abs(ch[0]) < 1e-5 && abs(ch[0]) < 1e-5;
+    bool centered = std::abs(ch[0]) < 1e-5 && std::abs(ch[1]) < 1e-5 &&
+                    std::abs(ch[2]) < 1e-5 && std::abs(ch[3]) < 1e-5;
     return centered;
 }
 
 Odom_Data_t::Odom_Data_t()
 {
     rcv_stamp = ros::Time(0);
+    rcv_steady_stamp = ros::SteadyTime();
+    p.setZero();
+    v.setZero();
     q.setIdentity();
+    w.setZero();
     recv_new_msg = false;
 };
 
@@ -129,9 +174,27 @@ void Odom_Data_t::feed(nav_msgs::OdometryConstPtr pMsg)
 
     msg = *pMsg;
     rcv_stamp = now;
+    rcv_steady_stamp = ros::SteadyTime::now();
     recv_new_msg = true;
 
     uav_utils::extract_odometry(pMsg, p, v, q, w);
+    const bool source_stamp_valid = !msg.header.stamp.isZero() &&
+        (!source_stamp_seen || msg.header.stamp > last_source_stamp);
+    if (source_stamp_valid)
+    {
+        source_stamp_seen = true;
+        last_source_stamp = msg.header.stamp;
+    }
+    data_valid = source_stamp_valid && p.allFinite() && v.allFinite() &&
+                 w.allFinite() && quaternionIsValid(q);
+    if (data_valid)
+    {
+        q.normalize();
+    }
+    else
+    {
+        ROS_ERROR_THROTTLE(1.0, "Invalid odometry sample received; control will be inhibited.");
+    }
 
 // #define VEL_IN_BODY
 #ifdef VEL_IN_BODY /* Set to 1 if the velocity in odom topic is relative to current body frame, not to world frame.*/
@@ -162,6 +225,10 @@ void Odom_Data_t::feed(nav_msgs::OdometryConstPtr pMsg)
 Imu_Data_t::Imu_Data_t()
 {
     rcv_stamp = ros::Time(0);
+    rcv_steady_stamp = ros::SteadyTime();
+    q.setIdentity();
+    w.setZero();
+    a.setZero();
 }
 
 void Imu_Data_t::feed(sensor_msgs::ImuConstPtr pMsg)
@@ -170,6 +237,7 @@ void Imu_Data_t::feed(sensor_msgs::ImuConstPtr pMsg)
 
     msg = *pMsg;
     rcv_stamp = now;
+    rcv_steady_stamp = ros::SteadyTime::now();
 
     w(0) = msg.angular_velocity.x;
     w(1) = msg.angular_velocity.y;
@@ -183,6 +251,24 @@ void Imu_Data_t::feed(sensor_msgs::ImuConstPtr pMsg)
     q.y() = msg.orientation.y;
     q.z() = msg.orientation.z;
     q.w() = msg.orientation.w;
+
+    const bool source_stamp_valid = !msg.header.stamp.isZero() &&
+        (!source_stamp_seen || msg.header.stamp > last_source_stamp);
+    if (source_stamp_valid)
+    {
+        source_stamp_seen = true;
+        last_source_stamp = msg.header.stamp;
+    }
+    data_valid = source_stamp_valid && w.allFinite() && a.allFinite() &&
+                 quaternionIsValid(q);
+    if (data_valid)
+    {
+        q.normalize();
+    }
+    else
+    {
+        ROS_ERROR_THROTTLE(1.0, "Invalid FCU IMU sample received; control will be inhibited.");
+    }
 
     // check the frequency
     static int one_min_count = 9999;
@@ -201,26 +287,37 @@ void Imu_Data_t::feed(sensor_msgs::ImuConstPtr pMsg)
 
 State_Data_t::State_Data_t()
 {
+    rcv_steady_stamp = ros::SteadyTime();
 }
 
 void State_Data_t::feed(mavros_msgs::StateConstPtr pMsg)
 {
 
     current_state = *pMsg;
+    rcv_steady_stamp = ros::SteadyTime::now();
 }
 
 ExtendedState_Data_t::ExtendedState_Data_t()
 {
+    rcv_steady_stamp = ros::SteadyTime();
 }
 
 void ExtendedState_Data_t::feed(mavros_msgs::ExtendedStateConstPtr pMsg)
 {
     current_extended_state = *pMsg;
+    rcv_steady_stamp = ros::SteadyTime::now();
 }
 
 Command_Data_t::Command_Data_t()
 {
     rcv_stamp = ros::Time(0);
+    rcv_steady_stamp = ros::SteadyTime();
+    p.setZero();
+    v.setZero();
+    a.setZero();
+    j.setZero();
+    yaw = 0.0;
+    yaw_rate = 0.0;
 }
 
 void Command_Data_t::feed(quadrotor_msgs::PositionCommandConstPtr pMsg)
@@ -228,6 +325,7 @@ void Command_Data_t::feed(quadrotor_msgs::PositionCommandConstPtr pMsg)
 
     msg = *pMsg;
     rcv_stamp = ros::Time::now();
+    rcv_steady_stamp = ros::SteadyTime::now();
 
     p(0) = msg.position.x;
     p(1) = msg.position.y;
@@ -247,13 +345,28 @@ void Command_Data_t::feed(quadrotor_msgs::PositionCommandConstPtr pMsg)
 
     // std::cout << "j1=" << j.transpose() << std::endl;
 
-    yaw = uav_utils::normalize_angle(msg.yaw);
-    yaw_rate = msg.yaw_dot;
+    const bool source_stamp_valid = !msg.header.stamp.isZero() &&
+        (!source_stamp_seen || msg.header.stamp > last_source_stamp);
+    if (source_stamp_valid)
+    {
+        source_stamp_seen = true;
+        last_source_stamp = msg.header.stamp;
+    }
+    const bool scalar_valid = std::isfinite(msg.yaw) && std::isfinite(msg.yaw_dot);
+    yaw = scalar_valid ? std::remainder(msg.yaw, 2.0 * M_PI) : 0.0;
+    yaw_rate = scalar_valid ? msg.yaw_dot : 0.0;
+    data_valid = source_stamp_valid && p.allFinite() && v.allFinite() &&
+                 a.allFinite() && j.allFinite() && scalar_valid;
+    if (!data_valid)
+    {
+        ROS_ERROR_THROTTLE(1.0, "Invalid position command received; command will be ignored.");
+    }
 }
 
 Battery_Data_t::Battery_Data_t()
 {
     rcv_stamp = ros::Time(0);
+    rcv_steady_stamp = ros::SteadyTime();
 }
 
 void Battery_Data_t::feed(sensor_msgs::BatteryStateConstPtr pMsg)
@@ -261,6 +374,7 @@ void Battery_Data_t::feed(sensor_msgs::BatteryStateConstPtr pMsg)
 
     msg = *pMsg;
     rcv_stamp = ros::Time::now();
+    rcv_steady_stamp = ros::SteadyTime::now();
 
     double voltage = 0;
     for (size_t i = 0; i < pMsg->cell_voltage.size(); ++i)
@@ -294,6 +408,7 @@ void Battery_Data_t::feed(sensor_msgs::BatteryStateConstPtr pMsg)
 Takeoff_Land_Data_t::Takeoff_Land_Data_t()
 {
     rcv_stamp = ros::Time(0);
+    rcv_steady_stamp = ros::SteadyTime();
 }
 
 void Takeoff_Land_Data_t::feed(quadrotor_msgs::TakeoffLandConstPtr pMsg)
@@ -301,6 +416,7 @@ void Takeoff_Land_Data_t::feed(quadrotor_msgs::TakeoffLandConstPtr pMsg)
 
     msg = *pMsg;
     rcv_stamp = ros::Time::now();
+    rcv_steady_stamp = ros::SteadyTime::now();
 
     triggered = true;
     takeoff_land_cmd = pMsg->takeoff_land_cmd;

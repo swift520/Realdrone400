@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(fast_lio)
 
-SET(CMAKE_BUILD_TYPE "Debug")
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "Debug")
+endif()
 
 ADD_COMPILE_OPTIONS(-std=c++14 )
 ADD_COMPILE_OPTIONS(-std=c++14 )
@@ -88,3 +90,7 @@ add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cp
 add_dependencies(fastlio_mapping ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(fastlio_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${PYTHON_LIBRARIES})
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_esekf_update_status test/test_esekf_update_status.cpp)
+endif()

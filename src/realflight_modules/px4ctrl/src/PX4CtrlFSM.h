@@ -3,6 +3,7 @@
 
 #include <ros/ros.h>
 #include <ros/assert.h>
+#include <string>
 
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
@@ -11,6 +12,7 @@
 #include <mavros_msgs/CommandBool.h>
 
 #include "input.h"
+#include "localization_health.h"
 // #include "ThrustCurve.h"
 #include "controller.h"
 
@@ -38,6 +40,7 @@ public:
 	Command_Data_t cmd_data;
 	Battery_Data_t bat_data;
 	Takeoff_Land_Data_t takeoff_land_data;
+	LocalizationHealth_Data_t localization_health_data;
 
 	LinearControl &controller;
 
@@ -56,26 +59,52 @@ public:
 	enum State_t
 	{
 		MANUAL_CTRL = 1, // px4ctrl is deactived. FCU is controled by the remote controller only
+		OFFBOARD_PREP, // healthy hold-setpoint prestream, mode confirmation, and optional arming
 		AUTO_HOVER, // px4ctrl is actived, it will keep the drone hover from odom measurments while waiting for commands from PositionCommand topic.
 		CMD_CTRL,	// px4ctrl is actived, and controling the drone.
 		AUTO_TAKEOFF,
-		AUTO_LAND
+		AUTO_LAND,
+		FAILSAFE_EXIT // bounded setpoint handover while PX4 leaves OFFBOARD
 	};
 
 	PX4CtrlFSM(Parameter_t &, LinearControl &);
 	void process();
-	bool rc_is_received(const ros::Time &now_time);
-	bool cmd_is_received(const ros::Time &now_time);
-	bool odom_is_received(const ros::Time &now_time);
-	bool imu_is_received(const ros::Time &now_time);
-	bool bat_is_received(const ros::Time &now_time);
+	bool rc_is_received(const ros::SteadyTime &now_time);
+	bool cmd_is_received(const ros::SteadyTime &now_time);
+	bool odom_is_received(const ros::SteadyTime &now_time);
+	bool imu_is_received(const ros::SteadyTime &now_time);
+	bool bat_is_received(const ros::SteadyTime &now_time);
+	bool state_is_received(const ros::SteadyTime &now_time);
+	bool extended_state_is_received(const ros::SteadyTime &now_time);
 	bool recv_new_odom();
 	State_t get_state() { return state; }
 	bool get_landed() { return takeoff_land.landed; }
 
 private:
 	State_t state; // Should only be changed in PX4CtrlFSM::process() function!
+	State_t pending_offboard_state{AUTO_HOVER};
 	AutoTakeoffLand_t takeoff_land;
+	bool localization_fault_latched{false};
+	bool offboard_mode_confirmed{false};
+	bool mode_request_attempted{false};
+	bool mode_request_sent{false}; // MAVROS/PX4 acknowledged at least one request.
+	bool arm_request_sent{false};
+	ros::SteadyTime offboard_prepare_start;
+	ros::SteadyTime offboard_confirmed_time;
+	ros::SteadyTime last_mode_request_time;
+	ros::SteadyTime last_arm_request_time;
+
+	Controller_Output_t last_control_output;
+	bool last_control_output_valid{false};
+	Controller_Output_t failsafe_control_output;
+	bool failsafe_control_output_valid{false};
+	Eigen::Quaterniond failsafe_imu_attitude{Eigen::Quaterniond::Identity()};
+	bool failsafe_imu_attitude_valid{false};
+	ros::SteadyTime failsafe_start;
+	ros::SteadyTime failsafe_last_mode_request;
+	bool failsafe_mode_request_sent{false};
+	bool failsafe_stream_timeout_reported{false};
+	std::string failsafe_target_mode;
 
 	// ---- control related ----
 	Desired_State_t get_hover_des();
@@ -91,8 +120,18 @@ private:
 	// ---- tools ----
 	void set_hov_with_odom();
 	void set_hov_with_rc();
+	bool control_inputs_ready(const ros::SteadyTime &now_time, std::string *reason);
+	bool is_active_control_state(State_t candidate) const;
+	void start_offboard_preparation(State_t target, const ros::SteadyTime &now_time);
+	void start_failsafe_exit(const ros::SteadyTime &now_time, const std::string &reason,
+							 bool latch_fault, const std::string &target_mode);
+	bool prepare_failsafe_output(const ros::SteadyTime &now_time, Controller_Output_t &u);
+	bool validate_control_output(Controller_Output_t &u) const;
+	std::string localization_failsafe_mode(const ros::SteadyTime &now_time) const;
+	std::string previous_mode_or_failsafe(const ros::SteadyTime &now_time) const;
+	void clear_input_flags();
 
-	bool toggle_offboard_mode(bool on_off); // It will only try to toggle once, so not blocked.
+	bool request_fcu_mode(const std::string &mode); // Request acceptance is not mode confirmation.
 	bool toggle_arm_disarm(bool arm); // It will only try to toggle once, so not blocked.
 	void reboot_FCU();
 

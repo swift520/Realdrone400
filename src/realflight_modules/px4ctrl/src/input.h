@@ -30,6 +30,8 @@ public:
 
   mavros_msgs::RCIn msg;
   ros::Time rcv_stamp;
+  ros::SteadyTime rcv_steady_stamp;
+  bool data_valid{false};
 
   bool is_command_mode;
   bool enter_command_mode;
@@ -46,7 +48,6 @@ public:
   void check_validity();
   bool check_centered();
   void feed(mavros_msgs::RCInConstPtr pMsg);
-  bool is_received(const ros::Time &now_time);
 };
 
 class Odom_Data_t
@@ -60,7 +61,11 @@ public:
 
   nav_msgs::Odometry msg;
   ros::Time rcv_stamp;
+  ros::SteadyTime rcv_steady_stamp;
+  ros::Time last_source_stamp;
+  bool source_stamp_seen{false};
   bool recv_new_msg;
+  bool data_valid{false};
 
   Odom_Data_t();
   void feed(nav_msgs::OdometryConstPtr pMsg);
@@ -75,6 +80,10 @@ public:
 
   sensor_msgs::Imu msg;
   ros::Time rcv_stamp;
+  ros::SteadyTime rcv_steady_stamp;
+  ros::Time last_source_stamp;
+  bool source_stamp_seen{false};
+  bool data_valid{false};
 
   Imu_Data_t();
   void feed(sensor_msgs::ImuConstPtr pMsg);
@@ -85,6 +94,7 @@ class State_Data_t
 public:
   mavros_msgs::State current_state;
   mavros_msgs::State state_before_offboard;
+  ros::SteadyTime rcv_steady_stamp;
 
   State_Data_t();
   void feed(mavros_msgs::StateConstPtr pMsg);
@@ -94,6 +104,7 @@ class ExtendedState_Data_t
 {
 public:
   mavros_msgs::ExtendedState current_extended_state;
+  ros::SteadyTime rcv_steady_stamp;
 
   ExtendedState_Data_t();
   void feed(mavros_msgs::ExtendedStateConstPtr pMsg);
@@ -112,6 +123,10 @@ public:
 
   quadrotor_msgs::PositionCommand msg;
   ros::Time rcv_stamp;
+  ros::SteadyTime rcv_steady_stamp;
+  ros::Time last_source_stamp;
+  bool source_stamp_seen{false};
+  bool data_valid{false};
 
   Command_Data_t();
   void feed(quadrotor_msgs::PositionCommandConstPtr pMsg);
@@ -126,6 +141,7 @@ public:
 
   sensor_msgs::BatteryState msg;
   ros::Time rcv_stamp;
+  ros::SteadyTime rcv_steady_stamp;
 
   Battery_Data_t();
   void feed(sensor_msgs::BatteryStateConstPtr pMsg);
@@ -140,6 +156,7 @@ public:
 
   quadrotor_msgs::TakeoffLand msg;
   ros::Time rcv_stamp;
+  ros::SteadyTime rcv_steady_stamp;
 
   Takeoff_Land_Data_t();
   void feed(quadrotor_msgs::TakeoffLandConstPtr pMsg);

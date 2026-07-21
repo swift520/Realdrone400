@@ -194,7 +194,8 @@ image streams are high bandwidth (about 166 GB/hour before compression), so
 verify USB, CPU, and disk margins before flight.
 
 Each run creates a timestamped directory under `~/flight_logs/`. It contains
-LZ4-compressed rosbag segments (split every 10 minutes or 2048 MB), an
+LZ4-compressed rosbag segments (split at 500 MB by default, with no time-based
+split unless `--split-duration` is supplied), an
 event-only `events.csv`, the exact rosbag command, ROS/PX4 parameter dumps,
 node/topic/service lists, Git revision/status, and disk/session metadata. The
 recorder refuses a second concurrent instance and requires 8 GiB free at

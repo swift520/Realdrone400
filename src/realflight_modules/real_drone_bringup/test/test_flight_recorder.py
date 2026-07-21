@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "flight_recorder.py"
@@ -24,6 +25,39 @@ class EventSink:
 
 
 class FlightRecorderUnitTest(unittest.TestCase):
+    def test_default_bag_split_is_500_mb_without_time_limit(self):
+        args = MODULE.parse_args([])
+        self.assertEqual(args.split_size_mb, 500)
+        self.assertIsNone(args.split_duration)
+
+        class FakeProcess:
+            pid = 123
+
+            @staticmethod
+            def poll():
+                return None
+
+        with tempfile.TemporaryDirectory() as root:
+            recorder = MODULE.FlightRecorder.__new__(MODULE.FlightRecorder)
+            recorder.args = SimpleNamespace(
+                split_duration=args.split_duration,
+                split_size_mb=args.split_size_mb,
+                buffer_mb=args.buffer_mb,
+                min_space=args.min_space,
+                no_compression=args.no_compression,
+            )
+            recorder.session_dir = Path(root)
+            recorder.topics = ["/test/topic"]
+            recorder.events = EventSink()
+            with mock.patch.object(MODULE.subprocess, "Popen", return_value=FakeProcess()) as popen, \
+                    mock.patch.object(MODULE.time, "sleep"):
+                recorder._start_bag()
+            recorder.bag_log_handle.close()
+
+        command = popen.call_args.args[0]
+        self.assertIn("--size=500", command)
+        self.assertFalse(any(item.startswith("--duration=") for item in command))
+
     def test_topic_profiles_are_explicit_and_unique(self):
         compact = MODULE.build_topics()
         raw = MODULE.build_topics(with_lidar=True)

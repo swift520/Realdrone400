@@ -1,63 +1,41 @@
-#!/bin/sh
+#!/usr/bin/env bash
+set -e
 
 WORKSPACE_DIR="/home/haowen2/code/REAL_DRONE_400"
-REALSENSE_READY_SERVICE="/camera/stereo_module/set_parameters"
+REAL_DRONE_SETUP="${WORKSPACE_DIR}/devel/setup.bash"
+LIVOX_SETUP="/home/haowen2/3rd_party/ws_livox/devel/setup.bash"
 
-sleep 30
-gnome-terminal --window -- bash -c \
-"source ${WORKSPACE_DIR}/devel/setup.bash;
- # Start MAVROS only.  The vision bridge is started once, after FAST-LIO.
- roslaunch real_drone_bringup takeoff_px4.launch enable_vision_bridge:=false; exec bash" &
+start_terminal() {
+  local setup_file="$1"
+  shift
+  gnome-terminal --window -- bash -c '
+    setup_file="$1"
+    shift
+    source_workspace_setup() {
+      source "$setup_file"
+    }
+    source_workspace_setup
+    unset -f source_workspace_setup
+    "$@"
+    exec bash
+  ' bash "${setup_file}" "$@" &
+}
 
-# Wait for the ROS master created by the first launch.  This avoids a race where
-# the Realsense launch and MAVROS both try to start roscore.
-if ! timeout 15 bash -c \
-  "source ${WORKSPACE_DIR}/devel/setup.bash;
-   until rosparam get /rosversion >/dev/null 2>&1; do sleep 0.25; done"; then
-  echo "[WARN] ROS master was not ready after 15 seconds; continuing startup."
-fi
+"${WORKSPACE_DIR}/home_shfiles/wait_for_time_sync.sh"
 
-# Start the Realsense driver before the recorder.  The recorder uses the
-# dynamic-reconfigure service below to enable the infrared emitter.
-gnome-terminal --window -- bash -c \
-"source ${WORKSPACE_DIR}/devel/setup.bash;
- roslaunch realsense2_camera rs_camera.launch \
-   enable_color:=true enable_depth:=true \
-   enable_infra:=false enable_infra1:=true enable_infra2:=true; exec bash" &
+start_terminal "${REAL_DRONE_SETUP}" \
+  roslaunch real_drone_bringup takeoff_px4.launch enable_vision_bridge:=false
 
-# Give the camera time to enumerate and publish its parameter service.  Camera
-# failure must not block the core flight recorder or the rest of the stack.
-realsense_recorder_timeout=8
-if timeout 20 bash -c \
-  "source ${WORKSPACE_DIR}/devel/setup.bash;
-   until rosservice info ${REALSENSE_READY_SERVICE} >/dev/null 2>&1; do sleep 0.25; done"; then
-  echo "[INFO] Realsense is ready: ${REALSENSE_READY_SERVICE}"
-else
-  echo "[WARN] Realsense was not ready after 20 seconds; core flight recording will continue without camera topics."
-  # The recorder no longer needs to repeat the full service wait in this case.
-  realsense_recorder_timeout=1
-fi
+"${WORKSPACE_DIR}/home_shfiles/start_realsense_recording.sh" realdrone400 --with-lidar
 
-gnome-terminal --window -- bash -c \
-"cd ${WORKSPACE_DIR};
-# Start the compact recorder before sensors/mapping to capture startup transitions.
-./home_shfiles/start_flight_record.sh realdrone400 --with-realsense --realsense-timeout ${realsense_recorder_timeout} --with-lidar; exec bash" &
+start_terminal "${LIVOX_SETUP}" roslaunch livox_ros_driver2 msg_MID360.launch
 
 sleep 1
-gnome-terminal --window -- bash -c \
-"source /home/haowen2/3rd_party/ws_livox/devel/setup.bash;
-roslaunch livox_ros_driver2 msg_MID360.launch; exec bash"  &
+start_terminal "${REAL_DRONE_SETUP}" roslaunch fast_lio mapping_mid360.launch rviz:=false
 
 sleep 1
-gnome-terminal --window -- bash -c \
-"source ${WORKSPACE_DIR}/devel/setup.bash;
-roslaunch fast_lio mapping_mid360.launch rviz:=false; exec bash"  &
+start_terminal "${REAL_DRONE_SETUP}" roslaunch real_drone_bringup takeoff_vrpn.launch
 
-sleep 1
-gnome-terminal --window -- bash -c \
-"source ${WORKSPACE_DIR}/devel/setup.bash;
-# Start the single external-vision bridge after both FAST-LIO streams exist.
-roslaunch real_drone_bringup takeoff_vrpn.launch; exec bash"  &
 
 #sleep 1
 #gnome-terminal --window -- bash -c \

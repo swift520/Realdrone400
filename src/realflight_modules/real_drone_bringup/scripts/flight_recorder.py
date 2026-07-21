@@ -292,13 +292,14 @@ class FlightRecorder:
         command = [
             "rosbag", "record",
             "--split",
-            "--duration={}".format(self.args.split_duration),
             "--size={}".format(self.args.split_size_mb),
             "--buffsize={}".format(self.args.buffer_mb),
             "--min-space={}".format(self.args.min_space),
             "--tcpnodelay",
             "--repeat-latched",
         ]
+        if self.args.split_duration:
+            command.append("--duration={}".format(self.args.split_duration))
         if not self.args.no_compression:
             command.append("--lz4")
         command.extend(("-O", str(self.session_dir / "flight.bag")))
@@ -685,8 +686,10 @@ def parse_args(argv):
     parser.add_argument("--realsense-timeout", type=float, default=8.0,
                         help="seconds to wait for emitter control and each image stream")
     parser.add_argument("--extra-topic", action="append", default=[])
-    parser.add_argument("--split-duration", default="10m")
-    parser.add_argument("--split-size-mb", type=int, default=2048)
+    parser.add_argument("--split-duration", default=None,
+                        help="optional maximum duration per bag, such as 15s or 10m")
+    parser.add_argument("--split-size-mb", type=int, default=500,
+                        help="maximum bag size in MB (default: 500)")
     parser.add_argument("--buffer-mb", type=int, default=256)
     parser.add_argument("--min-space", default="5G",
                         help="rosbag stops before the recording filesystem falls below this")

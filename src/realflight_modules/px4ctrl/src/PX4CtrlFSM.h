@@ -64,6 +64,7 @@ public:
 		CMD_CTRL,	// px4ctrl is actived, and controling the drone.
 		AUTO_TAKEOFF,
 		AUTO_LAND,
+		NORMAL_OFFBOARD_EXIT, // landed and disarmed; wait for non-OFFBOARD feedback without setpoints
 		FAILSAFE_EXIT // bounded setpoint handover while PX4 leaves OFFBOARD
 	};
 
@@ -84,11 +85,14 @@ private:
 	State_t state; // Should only be changed in PX4CtrlFSM::process() function!
 	State_t pending_offboard_state{AUTO_HOVER};
 	AutoTakeoffLand_t takeoff_land;
+	bool landing_disarm_message_pending{true};
 	bool localization_fault_latched{false};
 	bool offboard_mode_confirmed{false};
 	bool mode_request_attempted{false};
 	bool mode_request_sent{false}; // MAVROS/PX4 acknowledged at least one request.
-	bool arm_request_sent{false};
+	bool arm_request_attempted{false};
+	bool arm_request_accepted{false};
+	Eigen::Vector3d arm_request_position{Eigen::Vector3d::Zero()};
 	ros::SteadyTime offboard_prepare_start;
 	ros::SteadyTime offboard_confirmed_time;
 	ros::SteadyTime last_mode_request_time;
@@ -105,12 +109,17 @@ private:
 	bool failsafe_mode_request_sent{false};
 	bool failsafe_stream_timeout_reported{false};
 	std::string failsafe_target_mode;
+	ros::SteadyTime normal_exit_start;
+	ros::SteadyTime normal_exit_last_mode_request;
+	bool normal_exit_mode_request_accepted{false};
+	std::string normal_exit_target_mode;
 
 	// ---- control related ----
 	Desired_State_t get_hover_des();
 	Desired_State_t get_cmd_des();
 
 	// ---- auto takeoff/land ----
+	void prepare_arm_wait_output(const Imu_Data_t &imu, Controller_Output_t &u);
 	void motors_idling(const Imu_Data_t &imu, Controller_Output_t &u);
 	void land_detector(const State_t state, const Desired_State_t &des, const Odom_Data_t &odom); // Detect landing 
 	void set_start_pose_for_takeoff_land(const Odom_Data_t &odom);
@@ -123,6 +132,9 @@ private:
 	bool control_inputs_ready(const ros::SteadyTime &now_time, std::string *reason);
 	bool is_active_control_state(State_t candidate) const;
 	void start_offboard_preparation(State_t target, const ros::SteadyTime &now_time);
+	void start_normal_offboard_exit(const ros::SteadyTime &now_time,
+									const std::string &target_mode);
+	void process_normal_offboard_exit(const ros::SteadyTime &now_time);
 	void start_failsafe_exit(const ros::SteadyTime &now_time, const std::string &reason,
 							 bool latch_fault, const std::string &target_mode);
 	bool prepare_failsafe_output(const ros::SteadyTime &now_time, Controller_Output_t &u);

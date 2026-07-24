@@ -22,6 +22,7 @@ class Px4ctrlHealthGateTest(unittest.TestCase):
         self._health = None
         self._mode = "MANUAL"
         self._armed = False
+        self._landed_state = ExtendedState.LANDED_STATE_ON_GROUND
         self._accept_offboard_requests = True
         self._setpoints = []
         self._mode_requests = []
@@ -79,6 +80,7 @@ class Px4ctrlHealthGateTest(unittest.TestCase):
                 mode = self._mode
                 armed = self._armed
                 health = self._health
+                landed_state = self._landed_state
 
             state = State()
             state.header.stamp = now
@@ -89,7 +91,7 @@ class Px4ctrlHealthGateTest(unittest.TestCase):
 
             extended = ExtendedState()
             extended.header.stamp = now
-            extended.landed_state = ExtendedState.LANDED_STATE_ON_GROUND
+            extended.landed_state = landed_state
             self._extended_pub.publish(extended)
 
             odom = Odometry()
@@ -139,6 +141,10 @@ class Px4ctrlHealthGateTest(unittest.TestCase):
     def _set_health(self, value):
         with self._lock:
             self._health = value
+
+    def _set_landed_state(self, value):
+        with self._lock:
+            self._landed_state = value
 
     def _set_offboard_request_acceptance(self, accepted):
         with self._lock:
@@ -245,8 +251,44 @@ class Px4ctrlHealthGateTest(unittest.TestCase):
         self._set_vehicle_state("OFFBOARD", False)
         self._wait_until(lambda: any(value for _, value in self._snapshot()[2]),
                          0.5, "arming was not requested after OFFBOARD confirmation")
+
+        # PX4's land detector can leave ON_GROUND as soon as it accepts ARM,
+        # before the lower-rate /mavros/state heartbeat reports armed=true.
+        # This transient must not abort entry, and the preparation stream must
+        # remain at a zero-thrust request throughout the feedback gap.
+        in_air_time = time.monotonic()
+        setpoint_count_before_arm_feedback = len(self._snapshot()[0])
+        self._set_landed_state(ExtendedState.LANDED_STATE_IN_AIR)
+        self._wait_until(
+            lambda: len(self._snapshot()[0]) >=
+            setpoint_count_before_arm_feedback + 3,
+            0.4, "setpoints stopped during the arming feedback gap")
+        rospy.sleep(0.10)
+        setpoints, modes, _ = self._snapshot()
+        pending_arm_setpoints = [
+            msg for stamp, msg in setpoints if stamp >= in_air_time
+        ]
+        self.assertTrue(pending_arm_setpoints,
+                        "no setpoints were captured during arming confirmation")
+        self.assertLessEqual(
+            max(abs(msg.thrust) for msg in pending_arm_setpoints), 1.0e-6,
+            "takeoff preparation published nonzero thrust before armed feedback")
+        self.assertFalse(
+            any(stamp >= in_air_time and mode == "AUTO.LAND"
+                for stamp, mode in modes),
+            "PX4's expected post-ARM landed-state transition aborted entry")
+
+        armed_feedback_time = time.monotonic()
         self._set_vehicle_state("OFFBOARD", True)
-        rospy.sleep(0.20)
+        self._wait_until(
+            lambda: any(stamp >= armed_feedback_time and msg.thrust > 0.05
+                        for stamp, msg in self._snapshot()[0]),
+            0.4, "takeoff did not start after armed feedback")
+        rospy.sleep(0.10)
+        self.assertFalse(
+            any(stamp >= armed_feedback_time and mode == "AUTO.LAND"
+                for stamp, mode in self._snapshot()[1]),
+            "IN_AIR landed state aborted entry when armed feedback arrived")
 
         # Simulate a bridge crash: leave its final latched true in ROS but stop
         # heartbeat publication. The steady-time timeout must enter failsafe.
@@ -281,6 +323,7 @@ class Px4ctrlHealthGateTest(unittest.TestCase):
         # Disarm + a healthy interval clears the local latch. A new explicit
         # takeoff command is then required and starts a fresh prestream.
         self._set_vehicle_state("MANUAL", False)
+        self._set_landed_state(ExtendedState.LANDED_STATE_ON_GROUND)
         rospy.sleep(0.30)
         reentry_start = time.monotonic()
         self._publish_takeoff()

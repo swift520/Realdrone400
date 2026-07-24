@@ -84,6 +84,7 @@ if(CATKIN_ENABLE_TESTING)
     target_link_libraries(test_controller_safety ${catkin_LIBRARIES})
   endif()
   add_rostest(test/px4ctrl_health_gate.test)
+  add_rostest(test/px4ctrl_normal_landing_exit.test)
 endif()
 
 catkin_install_python(PROGRAMS thrust_calibrate_scrips/thrust_calibrate.py

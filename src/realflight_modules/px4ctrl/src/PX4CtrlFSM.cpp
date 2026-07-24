@@ -7,6 +7,12 @@
 using namespace std;
 using namespace uav_utils;
 
+namespace
+{
+constexpr double TAKEOFF_STATIC_VELOCITY_LIMIT = 0.1;
+constexpr double ARM_CONFIRMATION_POSITION_LIMIT = 0.1;
+}
+
 PX4CtrlFSM::PX4CtrlFSM(Parameter_t &param_, LinearControl &controller_) : param(param_), controller(controller_) /*, thrust_curve(thrust_curve_)*/
 {
 	state = MANUAL_CTRL;
@@ -53,6 +59,35 @@ void PX4CtrlFSM::process()
 	Desired_State_t des;
 	bool have_desired_state = false;
 	bool rotor_low_speed_during_land = false;
+
+	// Normal landing completion takes precedence over active-control health
+	// guards.  Once both land detectors agree and PX4 reports disarmed, no
+	// external setpoint is needed or desirable, even if another input becomes
+	// stale in the same cycle.
+	const bool confirmed_landing_disarm =
+		state == AUTO_LAND && get_landed() &&
+		state_is_received(steady_now) && state_data.current_state.connected &&
+		!state_data.current_state.armed &&
+		extended_state_is_received(steady_now) &&
+		extended_state_data.current_extended_state.landed_state ==
+			mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND;
+	if (confirmed_landing_disarm)
+	{
+		if (!state_data.current_state.mode.empty() &&
+			state_data.current_state.mode != "OFFBOARD")
+		{
+			ROS_INFO("[px4ctrl] Landing complete; PX4 is disarmed in mode '%s'. "
+					 "External setpoints stopped.",
+					 state_data.current_state.mode.c_str());
+			takeoff_land.delay_trigger.first = false;
+			last_control_output_valid = false;
+			state = MANUAL_CTRL;
+			clear_input_flags();
+			return;
+		}
+		start_normal_offboard_exit(steady_now,
+								   previous_mode_or_failsafe(steady_now));
+	}
 
 	// A fault can only clear after the aircraft is disarmed, PX4 has left
 	// OFFBOARD, and the upstream bridge has completed a new healthy interval.
@@ -178,7 +213,7 @@ void PX4CtrlFSM::process()
 				ROS_ERROR("[px4ctrl] Reject AUTO_TAKEOFF: stop PositionCommand first.");
 				break;
 			}
-			if (odom_data.v.norm() > 0.1)
+			if (odom_data.v.norm() > TAKEOFF_STATIC_VELOCITY_LIMIT)
 			{
 				ROS_ERROR("[px4ctrl] Reject AUTO_TAKEOFF: odometry velocity %.3f m/s is not static.",
 						  odom_data.v.norm());
@@ -298,26 +333,59 @@ void PX4CtrlFSM::process()
 
 		if (pending_offboard_state == AUTO_TAKEOFF)
 		{
-			const bool takeoff_condition_lost =
-				odom_data.v.norm() > 0.1 || !get_landed() ||
-				!extended_state_is_received(steady_now) ||
-				extended_state_data.current_extended_state.landed_state !=
-					mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND ||
-				(!param.takeoff_land.no_RC && !rc_data.check_centered());
-			if (takeoff_condition_lost)
+			const bool extended_state_fresh = extended_state_is_received(steady_now);
+			const uint8_t px4_landed_state =
+				extended_state_data.current_extended_state.landed_state;
+			const bool expected_px4_arm_transition =
+				arm_request_accepted &&
+				(px4_landed_state ==
+					 mavros_msgs::ExtendedState::LANDED_STATE_IN_AIR ||
+				 px4_landed_state ==
+					 mavros_msgs::ExtendedState::LANDED_STATE_TAKEOFF);
+			const bool px4_landed_state_unsafe =
+				px4_landed_state !=
+					mavros_msgs::ExtendedState::LANDED_STATE_ON_GROUND &&
+				!expected_px4_arm_transition;
+			const bool moved_after_arm_acceptance =
+				arm_request_accepted &&
+				(odom_data.p - arm_request_position).norm() >
+					ARM_CONFIRMATION_POSITION_LIMIT;
+
+			std::string takeoff_condition_failure;
+			if (odom_data.v.norm() > TAKEOFF_STATIC_VELOCITY_LIMIT)
+				takeoff_condition_failure =
+					"odometry velocity exceeded the takeoff static limit";
+			else if (moved_after_arm_acceptance)
+				takeoff_condition_failure =
+					"vehicle position changed while waiting for arming confirmation";
+			else if (!get_landed())
+				takeoff_condition_failure =
+					"internal land detector changed during OFFBOARD entry";
+			else if (!extended_state_fresh)
+				takeoff_condition_failure =
+					"PX4 extended-state heartbeat timed out during OFFBOARD entry";
+			else if (px4_landed_state_unsafe)
+				takeoff_condition_failure = arm_request_accepted
+					? "PX4 reported an unexpected landed state while waiting for arming confirmation"
+					: "PX4 no longer reported on-ground before arming was accepted";
+			else if (!param.takeoff_land.no_RC && !rc_data.check_centered())
+				takeoff_condition_failure =
+					"RC sticks left center during OFFBOARD entry";
+
+			if (!takeoff_condition_failure.empty())
 			{
 				if (mode_request_attempted || state_data.current_state.mode == "OFFBOARD")
 				{
 					start_failsafe_exit(steady_now,
-									"takeoff safety condition changed during OFFBOARD entry", true,
+									takeoff_condition_failure, true,
 									localization_failsafe_mode(steady_now));
 				}
 				else
 				{
 					localization_fault_latched = true;
 					state = MANUAL_CTRL;
-					ROS_ERROR("[px4ctrl] AUTO_TAKEOFF preparation aborted: vehicle moved, "
-							  "landed state changed, or RC sticks left center.");
+					ROS_ERROR("[px4ctrl] AUTO_TAKEOFF preparation aborted: %s.",
+							  takeoff_condition_failure.c_str());
 				}
 				break;
 			}
@@ -416,13 +484,19 @@ void PX4CtrlFSM::process()
 								localization_failsafe_mode(steady_now));
 				break;
 			}
-			if (!arm_request_sent ||
-				(steady_now - last_arm_request_time).toSec() >=
-					param.localization_health.mode_retry_interval)
+			if (!arm_request_accepted &&
+				(!arm_request_attempted ||
+				 (steady_now - last_arm_request_time).toSec() >=
+					 param.localization_health.mode_retry_interval))
 			{
-				toggle_arm_disarm(true);
-				arm_request_sent = true;
+				arm_request_attempted = true;
 				last_arm_request_time = steady_now;
+				if (toggle_arm_disarm(true))
+				{
+					arm_request_accepted = true;
+					arm_request_position = odom_data.p;
+					ROS_INFO("[px4ctrl] PX4 accepted ARM; waiting for armed state feedback.");
+				}
 			}
 			break;
 		}
@@ -457,6 +531,7 @@ void PX4CtrlFSM::process()
 				 takeoff_land_data.takeoff_land_cmd == quadrotor_msgs::TakeoffLand::LAND)
 		{
 			state = AUTO_LAND;
+			landing_disarm_message_pending = true;
 			set_start_pose_for_takeoff_land(odom_data);
 			des = get_takeoff_land_des(-param.takeoff_land.speed);
 			ROS_INFO("\033[32m[px4ctrl] AUTO_HOVER(L2) --> AUTO_LAND\033[0m");
@@ -564,11 +639,10 @@ void PX4CtrlFSM::process()
 			rotor_low_speed_during_land = true;
 			have_desired_state = true;
 
-			static bool print_once_flag = true;
-			if (print_once_flag)
+			if (landing_disarm_message_pending)
 			{
 				ROS_INFO("[px4ctrl] Internal and PX4 landing detectors agree; requesting disarm.");
-				print_once_flag = false;
+				landing_disarm_message_pending = false;
 			}
 
 			static double last_trial_time = 0.0;
@@ -577,15 +651,12 @@ void PX4CtrlFSM::process()
 				toggle_arm_disarm(false);
 				last_trial_time = now_time.toSec();
 			}
-			else if (!state_data.current_state.armed)
-			{
-				print_once_flag = true;
-				start_failsafe_exit(steady_now, "landing complete", false,
-								previous_mode_or_failsafe(steady_now));
-			}
 		}
 		break;
 	}
+
+	case NORMAL_OFFBOARD_EXIT:
+		break;
 
 	case FAILSAFE_EXIT:
 		break;
@@ -594,6 +665,19 @@ void PX4CtrlFSM::process()
 		ROS_ERROR_THROTTLE(1.0, "[px4ctrl] Unknown FSM state; forcing MANUAL_CTRL.");
 		state = MANUAL_CTRL;
 		break;
+	}
+
+	// A completed landing is not a failsafe.  The vehicle is already confirmed
+	// on-ground and disarmed, so stop setpoints immediately while waiting for
+	// the lower-rate MAVROS state feedback to confirm the mode handover.
+	if (state == NORMAL_OFFBOARD_EXIT)
+	{
+		process_normal_offboard_exit(steady_now);
+		if (state != FAILSAFE_EXIT)
+		{
+			clear_input_flags();
+			return;
+		}
 	}
 
 	// FAILSAFE_EXIT never evaluates a position controller.  It may forward a
@@ -627,7 +711,16 @@ void PX4CtrlFSM::process()
 		controller.estimateThrustModel(imu_data.a, param);
 	}
 
-	if (rotor_low_speed_during_land)
+	const bool auto_takeoff_arm_preparation =
+		state == OFFBOARD_PREP && pending_offboard_state == AUTO_TAKEOFF;
+	if (auto_takeoff_arm_preparation)
+	{
+		// Keep the entire takeoff preparation stream at a zero-thrust external
+		// request.  PX4 may still enforce its configured armed-idle motor
+		// behavior while the lower-rate /mavros/state feedback reports disarmed.
+		prepare_arm_wait_output(imu_data, u);
+	}
+	else if (rotor_low_speed_during_land)
 	{
 		motors_idling(imu_data, u);
 	}
@@ -665,6 +758,14 @@ void PX4CtrlFSM::process()
 		land_detector(state, des, odom_data);
 
 	clear_input_flags();
+}
+
+void PX4CtrlFSM::prepare_arm_wait_output(const Imu_Data_t &imu,
+										 Controller_Output_t &u)
+{
+	u.q = imu.q;
+	u.bodyrates = Eigen::Vector3d::Zero();
+	u.thrust = 0.0;
 }
 
 void PX4CtrlFSM::motors_idling(const Imu_Data_t &imu, Controller_Output_t &u)
@@ -912,10 +1013,105 @@ void PX4CtrlFSM::start_offboard_preparation(State_t target,
 	last_arm_request_time = ros::SteadyTime();
 	mode_request_sent = false;
 	mode_request_attempted = false;
-	arm_request_sent = false;
+	arm_request_attempted = false;
+	arm_request_accepted = false;
+	arm_request_position.setZero();
 	offboard_mode_confirmed = false;
 	last_control_output_valid = false;
 	state = OFFBOARD_PREP;
+}
+
+void PX4CtrlFSM::start_normal_offboard_exit(const ros::SteadyTime &now_time,
+											 const std::string &target_mode)
+{
+	if (state == NORMAL_OFFBOARD_EXIT)
+		return;
+
+	normal_exit_start = now_time;
+	normal_exit_last_mode_request = ros::SteadyTime();
+	normal_exit_mode_request_accepted = false;
+	normal_exit_target_mode = target_mode;
+	if (normal_exit_target_mode.empty() || normal_exit_target_mode == "OFFBOARD")
+		normal_exit_target_mode = localization_failsafe_mode(now_time);
+
+	takeoff_land.delay_trigger.first = false;
+	last_control_output_valid = false;
+	state = NORMAL_OFFBOARD_EXIT;
+	ROS_INFO("[px4ctrl] Landing complete and PX4 disarmed; external setpoints stopped. "
+			 "Requesting '%s'.",
+			 normal_exit_target_mode.c_str());
+}
+
+void PX4CtrlFSM::process_normal_offboard_exit(const ros::SteadyTime &now_time)
+{
+	const bool state_fresh = state_is_received(now_time);
+	const bool state_connected =
+		state_fresh && state_data.current_state.connected;
+	const bool mode_known =
+		state_connected && !state_data.current_state.mode.empty();
+
+	if (mode_known && state_data.current_state.armed &&
+		state_data.rcv_steady_stamp > normal_exit_start)
+	{
+		start_failsafe_exit(now_time,
+							"vehicle re-armed unexpectedly after landing", true,
+							normal_exit_target_mode);
+		return;
+	}
+
+	if (mode_known && state_data.rcv_steady_stamp > normal_exit_start &&
+		!state_data.current_state.armed &&
+		state_data.current_state.mode != "OFFBOARD")
+	{
+		ROS_INFO("[px4ctrl] PX4 confirmed mode '%s'; normal landing exit complete.",
+				 state_data.current_state.mode.c_str());
+		takeoff_land.landed = true;
+		last_control_output_valid = false;
+		state = MANUAL_CTRL;
+		return;
+	}
+
+	const double retry_interval = normal_exit_mode_request_accepted
+		? param.msg_timeout.state
+		: param.localization_health.mode_retry_interval;
+	if (normal_exit_last_mode_request.isZero() ||
+		(now_time - normal_exit_last_mode_request).toSec() >= retry_interval)
+	{
+		const bool accepted = request_fcu_mode(normal_exit_target_mode);
+		if (accepted && !normal_exit_mode_request_accepted)
+		{
+			ROS_INFO("[px4ctrl] PX4 accepted mode request '%s'; waiting for state confirmation.",
+					 normal_exit_target_mode.c_str());
+		}
+		normal_exit_mode_request_accepted =
+			normal_exit_mode_request_accepted || accepted;
+		normal_exit_last_mode_request = now_time;
+	}
+
+	if (!state_fresh)
+	{
+		ROS_WARN_THROTTLE(1.0,
+						  "[px4ctrl] Normal landing exit is waiting for fresh MAVROS state; "
+						  "external setpoints remain stopped.");
+	}
+	else if (!state_data.current_state.connected)
+	{
+		ROS_WARN_THROTTLE(1.0,
+						  "[px4ctrl] Normal landing exit is waiting for FCU reconnection; "
+						  "external setpoints remain stopped.");
+	}
+	else if (state_data.current_state.mode.empty())
+	{
+		ROS_WARN_THROTTLE(1.0,
+						  "[px4ctrl] Normal landing exit is waiting for known PX4 mode; "
+						  "external setpoints remain stopped.");
+	}
+	else
+	{
+		ROS_INFO_THROTTLE(1.0,
+						  "[px4ctrl] Waiting for PX4 to leave OFFBOARD after landing; "
+						  "external setpoints remain stopped.");
+	}
 }
 
 void PX4CtrlFSM::start_failsafe_exit(const ros::SteadyTime &now_time,

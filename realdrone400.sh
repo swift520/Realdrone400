@@ -1,40 +1,27 @@
 #!/usr/bin/env bash
 set -e
 
-WORKSPACE_DIR="/home/haowen2/code/REAL_DRONE_400"
-REAL_DRONE_SETUP="${WORKSPACE_DIR}/devel/setup.bash"
-LIVOX_SETUP="/home/haowen2/3rd_party/ws_livox/devel/setup.bash"
+/home/haowen2/code/REAL_DRONE_400/home_shfiles/wait_for_time_sync.sh
 
-start_terminal() {
-  local setup_file="$1"
-  shift
-  gnome-terminal --window -- bash -c '
-    setup_file="$1"
-    shift
-    source_workspace_setup() {
-      source "$setup_file"
-    }
-    source_workspace_setup
-    unset -f source_workspace_setup
-    "$@"
-    exec bash
-  ' bash "${setup_file}" "$@" &
-}
+gnome-terminal --window -- bash -c \
+"source /home/haowen2/code/REAL_DRONE_400/devel/setup.bash;
+roslaunch real_drone_bringup takeoff_px4.launch enable_vision_bridge:=false; exec bash"  &
 
-"${WORKSPACE_DIR}/home_shfiles/wait_for_time_sync.sh"
+/home/haowen2/code/REAL_DRONE_400/home_shfiles/start_realsense_recording.sh realdrone400 --with-lidar
 
-start_terminal "${REAL_DRONE_SETUP}" \
-  roslaunch real_drone_bringup takeoff_px4.launch enable_vision_bridge:=false
-
-"${WORKSPACE_DIR}/home_shfiles/start_realsense_recording.sh" realdrone400 --with-lidar
-
-start_terminal "${LIVOX_SETUP}" roslaunch livox_ros_driver2 msg_MID360.launch
+gnome-terminal --window -- bash -c \
+"source /home/haowen2/3rd_party/ws_livox/devel/setup.bash;
+roslaunch livox_ros_driver2 msg_MID360.launch; exec bash"  &
 
 sleep 1
-start_terminal "${REAL_DRONE_SETUP}" roslaunch fast_lio mapping_mid360.launch rviz:=false
+gnome-terminal --window -- bash -c \
+"source /home/haowen2/code/REAL_DRONE_400/devel/setup.bash;
+roslaunch fast_lio mapping_mid360.launch rviz:=false; exec bash"  &
 
 sleep 1
-start_terminal "${REAL_DRONE_SETUP}" roslaunch real_drone_bringup takeoff_vrpn.launch
+gnome-terminal --window -- bash -c \
+"source /home/haowen2/code/REAL_DRONE_400/devel/setup.bash;
+roslaunch real_drone_bringup takeoff_vrpn.launch; exec bash"  &
 
 
 #sleep 1

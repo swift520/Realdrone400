@@ -84,6 +84,7 @@ if(CATKIN_ENABLE_TESTING)
     target_link_libraries(test_controller_safety ${catkin_LIBRARIES})
   endif()
   add_rostest(test/px4ctrl_health_gate.test)
+  add_rostest(test/px4ctrl_imu_resilience.test)
   add_rostest(test/px4ctrl_normal_landing_exit.test)
 endif()
 

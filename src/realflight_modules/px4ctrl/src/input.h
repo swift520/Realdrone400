@@ -74,19 +74,36 @@ public:
 class Imu_Data_t
 {
 public:
+  enum class ValidationError
+  {
+    NONE,
+    NO_VALID_SAMPLE,
+    NON_FINITE_ANGULAR_VELOCITY,
+    NON_FINITE_LINEAR_ACCELERATION,
+    INVALID_QUATERNION,
+    ZERO_SOURCE_TIMESTAMP
+  };
+
   Eigen::Quaterniond q;
   Eigen::Vector3d w;
   Eigen::Vector3d a;
 
   sensor_msgs::Imu msg;
   ros::Time rcv_stamp;
+  // rcv_steady_stamp belongs to the last accepted sample.  Raw receipt time is
+  // tracked separately so repeated/out-of-order source timestamps cannot keep
+  // stale control data fresh indefinitely.
   ros::SteadyTime rcv_steady_stamp;
+  ros::SteadyTime raw_rcv_steady_stamp;
   ros::Time last_source_stamp;
   bool source_stamp_seen{false};
+  bool last_sample_stamp_nonadvancing{false};
+  ValidationError validation_error{ValidationError::NO_VALID_SAMPLE};
   bool data_valid{false};
 
   Imu_Data_t();
   void feed(sensor_msgs::ImuConstPtr pMsg);
+  const char *validation_error_reason() const;
 };
 
 class State_Data_t

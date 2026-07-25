@@ -226,6 +226,7 @@ Imu_Data_t::Imu_Data_t()
 {
     rcv_stamp = ros::Time(0);
     rcv_steady_stamp = ros::SteadyTime();
+    raw_rcv_steady_stamp = ros::SteadyTime();
     q.setIdentity();
     w.setZero();
     a.setZero();
@@ -233,41 +234,93 @@ Imu_Data_t::Imu_Data_t()
 
 void Imu_Data_t::feed(sensor_msgs::ImuConstPtr pMsg)
 {
-    ros::Time now = ros::Time::now();
+    const ros::Time now = ros::Time::now();
+    const ros::SteadyTime steady_now = ros::SteadyTime::now();
+    raw_rcv_steady_stamp = steady_now;
 
-    msg = *pMsg;
-    rcv_stamp = now;
-    rcv_steady_stamp = ros::SteadyTime::now();
+    const Eigen::Vector3d candidate_w(
+        pMsg->angular_velocity.x,
+        pMsg->angular_velocity.y,
+        pMsg->angular_velocity.z);
+    const Eigen::Vector3d candidate_a(
+        pMsg->linear_acceleration.x,
+        pMsg->linear_acceleration.y,
+        pMsg->linear_acceleration.z);
+    Eigen::Quaterniond candidate_q(
+        pMsg->orientation.w,
+        pMsg->orientation.x,
+        pMsg->orientation.y,
+        pMsg->orientation.z);
 
-    w(0) = msg.angular_velocity.x;
-    w(1) = msg.angular_velocity.y;
-    w(2) = msg.angular_velocity.z;
-
-    a(0) = msg.linear_acceleration.x;
-    a(1) = msg.linear_acceleration.y;
-    a(2) = msg.linear_acceleration.z;
-
-    q.x() = msg.orientation.x;
-    q.y() = msg.orientation.y;
-    q.z() = msg.orientation.z;
-    q.w() = msg.orientation.w;
-
-    const bool source_stamp_valid = !msg.header.stamp.isZero() &&
-        (!source_stamp_seen || msg.header.stamp > last_source_stamp);
-    if (source_stamp_valid)
+    // Validate the payload before considering timestamp reordering.  A stale
+    // packet containing NaN/Inf or an invalid quaternion remains a hard fault
+    // instead of being silently classified as harmless reordering.
+    if (!candidate_w.allFinite())
     {
-        source_stamp_seen = true;
-        last_source_stamp = msg.header.stamp;
+        data_valid = false;
+        last_sample_stamp_nonadvancing = false;
+        validation_error = ValidationError::NON_FINITE_ANGULAR_VELOCITY;
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "FCU IMU angular velocity contains non-finite data; control will be inhibited.");
     }
-    data_valid = source_stamp_valid && w.allFinite() && a.allFinite() &&
-                 quaternionIsValid(q);
-    if (data_valid)
+    else if (!candidate_a.allFinite())
     {
-        q.normalize();
+        data_valid = false;
+        last_sample_stamp_nonadvancing = false;
+        validation_error = ValidationError::NON_FINITE_LINEAR_ACCELERATION;
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "FCU IMU linear acceleration contains non-finite data; control will be inhibited.");
+    }
+    else if (!quaternionIsValid(candidate_q))
+    {
+        data_valid = false;
+        last_sample_stamp_nonadvancing = false;
+        validation_error = ValidationError::INVALID_QUATERNION;
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "FCU IMU orientation quaternion is invalid; control will be inhibited.");
+    }
+    else if (pMsg->header.stamp.isZero())
+    {
+        data_valid = false;
+        last_sample_stamp_nonadvancing = false;
+        validation_error = ValidationError::ZERO_SOURCE_TIMESTAMP;
+        ROS_ERROR_THROTTLE(
+            1.0,
+            "FCU IMU source timestamp is zero; control will be inhibited.");
+    }
+    else if (source_stamp_seen && pMsg->header.stamp <= last_source_stamp)
+    {
+        // A delayed or duplicated packet must not overwrite the control
+        // snapshot, and must not refresh accepted-sample freshness.  Keeping
+        // the previous data_valid state lets an isolated packet be ignored;
+        // a stream that never advances naturally expires in imu_is_received().
+        last_sample_stamp_nonadvancing = true;
+        const double delta_ms =
+            (pMsg->header.stamp - last_source_stamp).toSec() * 1000.0;
+        ROS_WARN_THROTTLE(
+            1.0,
+            "Ignored out-of-order or duplicate FCU IMU sample "
+            "(source timestamp delta from last accepted %.3f ms); "
+            "retaining the last accepted sample.",
+            delta_ms);
     }
     else
     {
-        ROS_ERROR_THROTTLE(1.0, "Invalid FCU IMU sample received; control will be inhibited.");
+        candidate_q.normalize();
+        msg = *pMsg;
+        rcv_stamp = now;
+        rcv_steady_stamp = steady_now;
+        w = candidate_w;
+        a = candidate_a;
+        q = candidate_q;
+        source_stamp_seen = true;
+        last_source_stamp = pMsg->header.stamp;
+        last_sample_stamp_nonadvancing = false;
+        validation_error = ValidationError::NONE;
+        data_valid = true;
     }
 
     // check the frequency
@@ -283,6 +336,26 @@ void Imu_Data_t::feed(sensor_msgs::ImuConstPtr pMsg)
         last_clear_count_time = now;
     }
     one_min_count ++;
+}
+
+const char *Imu_Data_t::validation_error_reason() const
+{
+    switch (validation_error)
+    {
+    case ValidationError::NONE:
+        return "";
+    case ValidationError::NO_VALID_SAMPLE:
+        return "no valid FCU IMU sample has been accepted";
+    case ValidationError::NON_FINITE_ANGULAR_VELOCITY:
+        return "FCU IMU angular velocity contains non-finite data";
+    case ValidationError::NON_FINITE_LINEAR_ACCELERATION:
+        return "FCU IMU linear acceleration contains non-finite data";
+    case ValidationError::INVALID_QUATERNION:
+        return "FCU IMU orientation quaternion is invalid";
+    case ValidationError::ZERO_SOURCE_TIMESTAMP:
+        return "FCU IMU source timestamp is zero";
+    }
+    return "FCU IMU validation failed";
 }
 
 State_Data_t::State_Data_t()

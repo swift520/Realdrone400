@@ -1,0 +1,35 @@
+<launch>
+  <node pkg="px4ctrl" type="px4ctrl_node" name="px4ctrl" output="screen">
+    <rosparam command="load" file="$(find px4ctrl)/config/ctrl_param_fpv.yaml" />
+
+    <param name="auto_takeoff_land/no_RC" value="true" />
+    <param name="localization_health/freshness_timeout" value="0.20" />
+    <param name="localization_health/recovery_duration" value="0.20" />
+    <param name="localization_health/offboard_prestream_time" value="1.0" />
+    <param name="localization_health/offboard_entry_timeout" value="3.0" />
+    <param name="localization_health/arm_confirmation_timeout" value="1.0" />
+    <param name="localization_health/mode_retry_interval" value="0.05" />
+    <param name="localization_health/attitude_blend_time" value="0.10" />
+    <param name="localization_health/exit_stream_grace" value="0.30" />
+    <param name="msg_timeout/odom" value="0.50" />
+    <param name="msg_timeout/imu" value="0.25" />
+
+    <remap from="/mavros/state" to="/test_imu/mavros/state" />
+    <remap from="/mavros/extended_state" to="/test_imu/mavros/extended_state" />
+    <remap from="/mavros/imu/data" to="/test_imu/mavros/imu" />
+    <remap from="/mavros/battery" to="/test_imu/mavros/battery" />
+    <remap from="/mavros/setpoint_raw/attitude" to="/test_imu/mavros/setpoint_raw/attitude" />
+    <remap from="/mavros/set_mode" to="/test_imu/mavros/set_mode" />
+    <remap from="/mavros/cmd/arming" to="/test_imu/mavros/cmd/arming" />
+    <remap from="/mavros/cmd/command" to="/test_imu/mavros/cmd/command" />
+    <remap from="~odom" to="/test_imu/localization/validated_odom" />
+    <remap from="~localization_health" to="/test_imu/localization/healthy" />
+    <remap from="~cmd" to="/test_imu/position_cmd" />
+    <remap from="~takeoff_land" to="/test_imu/takeoff_land" />
+  </node>
+
+  <test test-name="px4ctrl_imu_resilience"
+        pkg="px4ctrl"
+        type="test_px4ctrl_imu_resilience.py"
+        time-limit="20" />
+</launch>

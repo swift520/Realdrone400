@@ -955,16 +955,26 @@ bool PX4CtrlFSM::control_inputs_ready(const ros::SteadyTime &now_time,
 			*reason = "odometry contains non-finite data or an invalid quaternion";
 		return false;
 	}
-	if (!imu_is_received(now_time))
-	{
-		if (reason)
-			*reason = "FCU IMU heartbeat timed out";
-		return false;
-	}
 	if (!imu_data.data_valid)
 	{
 		if (reason)
-			*reason = "FCU IMU contains non-finite data or an invalid quaternion";
+			*reason = imu_data.validation_error_reason();
+		return false;
+	}
+	if (!imu_is_received(now_time))
+	{
+		const bool raw_imu_is_recent =
+			now_time >= imu_data.raw_rcv_steady_stamp &&
+			(now_time - imu_data.raw_rcv_steady_stamp).toSec() <
+				param.msg_timeout.imu;
+		if (reason)
+		{
+			if (raw_imu_is_recent &&
+				imu_data.last_sample_stamp_nonadvancing)
+				*reason = "FCU IMU source timestamp stopped advancing";
+			else
+				*reason = "no fresh accepted FCU IMU sample within the timeout";
+		}
 		return false;
 	}
 	if (!state_is_received(now_time))

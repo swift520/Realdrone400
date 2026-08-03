@@ -139,6 +139,11 @@ FAST-LIO，再添加 `--with-lidar`；这会显著增加磁盘写入量。落地
 `~/flight_logs/`，完整选项和故障恢复方法见
 `src/realflight_modules/real_drone_bringup/README.md`。
 
+标准真机启动脚本使用 `start_realsense_recording.sh`，保留 640 x 480 的 Raw RGB
+和 Raw Depth，但将相机图像流统一配置为 15 Hz，以降低 USB、CPU 和录包写盘负载。
+如果已有其他 RealSense 节点以不同帧率运行，启动脚本会报错退出，需先关闭旧节点
+后重新启动。
+
 如果飞机螺旋桨开始旋转，但无法起飞，说明hover_percent参数过小；如果飞机有明显飞过1米高，再下降的样子，说明hover_percent参数过大；
 遥控器此时可以以类似大疆飞机的操作逻辑对无人机进行位置控制；
 ```

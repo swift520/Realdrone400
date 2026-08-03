@@ -172,13 +172,20 @@ serialization load. Other one-off topics can be added with repeated
 `--output-root /path/to/logs` or the `FLIGHT_LOG_ROOT` environment variable.
 
 To include D400-series RGB and raw depth images, their camera-info/metadata,
-and the depth-to-color extrinsics, start the camera first and select the
-Realsense profile:
+and the depth-to-color extrinsics, use the combined camera/recorder wrapper:
 
 ```bash
-roslaunch realsense2_camera rs_camera.launch
-./home_shfiles/start_flight_record.sh rgbd_test --with-realsense
+./home_shfiles/start_realsense_recording.sh rgbd_test
 ```
+
+The wrapper starts the color, depth, and stereo infrared streams at 15 Hz,
+checks the configured profile, measures the RGB and depth timestamp rates, and
+then selects the recorder's Realsense profile. If a Realsense node is already
+running at a different rate, the wrapper exits with an error instead of
+silently recording at that rate; stop the camera and rerun the wrapper. The
+recorded RGB and depth messages remain the original, uncompressed
+`sensor_msgs/Image` topics at 640 x 480 -- no compressed transport or image
+conversion is introduced.
 
 This profile requires `/camera/color/image_raw` and
 `/camera/depth/image_rect_raw`. Before rosbag starts, the recorder uses the
@@ -187,11 +194,13 @@ and a nonzero laser power (150 by default), verifies both image streams, and
 records the camera topics only when all checks pass. If the camera, emitter
 service, RGB stream, or depth stream is unavailable, it writes a WARN event,
 removes all Realsense topics from the rosbag command, and continues recording
-the core flight topics. Use `--realsense-namespace` for a non-default camera
-namespace and `--realsense-laser-power` only when the D400 hardware
-configuration requires a different tested value. The two raw 640 x 480, 30 Hz
-image streams are high bandwidth (about 166 GB/hour before compression), so
-verify USB, CPU, and disk margins before flight.
+the core flight topics. The combined wrapper controls the default `/camera`
+namespace; use `--realsense-namespace` only when starting a non-default camera
+and `start_flight_record.sh` directly. Use `--realsense-laser-power` only when
+the D400 hardware configuration requires a different tested value. Even at
+15 Hz the two raw 640 x 480 image streams remain high bandwidth (about
+83 GB/hour before compression), so verify USB, CPU, and disk margins before
+flight.
 
 Each run creates a timestamped directory under `~/flight_logs/`. It contains
 LZ4-compressed rosbag segments (split at 500 MB by default, with no time-based

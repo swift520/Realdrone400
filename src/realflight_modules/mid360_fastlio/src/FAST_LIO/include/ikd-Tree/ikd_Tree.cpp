@@ -27,6 +27,69 @@ KD_TREE<PointType>::~KD_TREE()
     Rebuild_Logger.clear();
 }
 
+template <typename PointType>
+void KD_TREE<PointType>::Record_Search_Wait(uint64_t wait_ns)
+{
+    search_wait_events.fetch_add(1, std::memory_order_relaxed);
+    search_wait_sum_ns.fetch_add(wait_ns, std::memory_order_relaxed);
+
+    uint64_t previous_max = search_wait_max_ns.load(std::memory_order_relaxed);
+    while (previous_max < wait_ns &&
+           !search_wait_max_ns.compare_exchange_weak(previous_max, wait_ns,
+                                                     std::memory_order_relaxed,
+                                                     std::memory_order_relaxed))
+    {
+    }
+}
+
+template <typename PointType>
+void KD_TREE<PointType>::Acquire_Search_Reader()
+{
+    bool waited_for_rebuild = false;
+    std::chrono::steady_clock::time_point wait_start;
+
+    pthread_mutex_lock(&search_flag_mutex);
+    while (search_mutex_counter == -1)
+    {
+        if (!waited_for_rebuild)
+        {
+            wait_start = std::chrono::steady_clock::now();
+            waited_for_rebuild = true;
+        }
+        pthread_mutex_unlock(&search_flag_mutex);
+        usleep(1);
+        pthread_mutex_lock(&search_flag_mutex);
+    }
+    search_mutex_counter += 1;
+    pthread_mutex_unlock(&search_flag_mutex);
+
+    if (waited_for_rebuild)
+    {
+        const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - wait_start)
+                                 .count();
+        Record_Search_Wait(static_cast<uint64_t>(wait_ns));
+    }
+}
+
+template <typename PointType>
+void KD_TREE<PointType>::Release_Search_Reader()
+{
+    pthread_mutex_lock(&search_flag_mutex);
+    search_mutex_counter -= 1;
+    pthread_mutex_unlock(&search_flag_mutex);
+}
+
+template <typename PointType>
+typename KD_TREE<PointType>::SearchWaitStats KD_TREE<PointType>::Take_Search_Wait_Stats()
+{
+    SearchWaitStats stats;
+    stats.events = search_wait_events.exchange(0, std::memory_order_relaxed);
+    stats.sum_ns = search_wait_sum_ns.exchange(0, std::memory_order_relaxed);
+    stats.max_ns = search_wait_max_ns.exchange(0, std::memory_order_relaxed);
+    return stats;
+}
+
 
 
 template <typename PointType>
@@ -434,19 +497,9 @@ void KD_TREE<PointType>::Nearest_Search(PointType point, int k_nearest, PointVec
     }
     else
     {
-        pthread_mutex_lock(&search_flag_mutex);
-        while (search_mutex_counter == -1)
-        {
-            pthread_mutex_unlock(&search_flag_mutex);
-            usleep(1);
-            pthread_mutex_lock(&search_flag_mutex);
-        }
-        search_mutex_counter += 1;
-        pthread_mutex_unlock(&search_flag_mutex);
+        Acquire_Search_Reader();
         Search(Root_Node, k_nearest, point, q, max_dist);
-        pthread_mutex_lock(&search_flag_mutex);
-        search_mutex_counter -= 1;
-        pthread_mutex_unlock(&search_flag_mutex);
+        Release_Search_Reader();
     }
     int k_found = min(k_nearest, int(q.size()));
     PointVector().swap(Nearest_Points);
@@ -1106,19 +1159,9 @@ void KD_TREE<PointType>::Search(KD_TREE_NODE *root, int k_nearest, PointType poi
             }
             else
             {
-                pthread_mutex_lock(&search_flag_mutex);
-                while (search_mutex_counter == -1)
-                {
-                    pthread_mutex_unlock(&search_flag_mutex);
-                    usleep(1);
-                    pthread_mutex_lock(&search_flag_mutex);
-                }
-                search_mutex_counter += 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Acquire_Search_Reader();
                 Search(root->left_son_ptr, k_nearest, point, q, max_dist);
-                pthread_mutex_lock(&search_flag_mutex);
-                search_mutex_counter -= 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Release_Search_Reader();
             }
             if (q.size() < k_nearest || dist_right_node < q.top().dist)
             {
@@ -1128,19 +1171,9 @@ void KD_TREE<PointType>::Search(KD_TREE_NODE *root, int k_nearest, PointType poi
                 }
                 else
                 {
-                    pthread_mutex_lock(&search_flag_mutex);
-                    while (search_mutex_counter == -1)
-                    {
-                        pthread_mutex_unlock(&search_flag_mutex);
-                        usleep(1);
-                        pthread_mutex_lock(&search_flag_mutex);
-                    }
-                    search_mutex_counter += 1;
-                    pthread_mutex_unlock(&search_flag_mutex);
+                    Acquire_Search_Reader();
                     Search(root->right_son_ptr, k_nearest, point, q, max_dist);
-                    pthread_mutex_lock(&search_flag_mutex);
-                    search_mutex_counter -= 1;
-                    pthread_mutex_unlock(&search_flag_mutex);
+                    Release_Search_Reader();
                 }
             }
         }
@@ -1152,19 +1185,9 @@ void KD_TREE<PointType>::Search(KD_TREE_NODE *root, int k_nearest, PointType poi
             }
             else
             {
-                pthread_mutex_lock(&search_flag_mutex);
-                while (search_mutex_counter == -1)
-                {
-                    pthread_mutex_unlock(&search_flag_mutex);
-                    usleep(1);
-                    pthread_mutex_lock(&search_flag_mutex);
-                }
-                search_mutex_counter += 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Acquire_Search_Reader();
                 Search(root->right_son_ptr, k_nearest, point, q, max_dist);
-                pthread_mutex_lock(&search_flag_mutex);
-                search_mutex_counter -= 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Release_Search_Reader();
             }
             if (q.size() < k_nearest || dist_left_node < q.top().dist)
             {
@@ -1174,19 +1197,9 @@ void KD_TREE<PointType>::Search(KD_TREE_NODE *root, int k_nearest, PointType poi
                 }
                 else
                 {
-                    pthread_mutex_lock(&search_flag_mutex);
-                    while (search_mutex_counter == -1)
-                    {
-                        pthread_mutex_unlock(&search_flag_mutex);
-                        usleep(1);
-                        pthread_mutex_lock(&search_flag_mutex);
-                    }
-                    search_mutex_counter += 1;
-                    pthread_mutex_unlock(&search_flag_mutex);
+                    Acquire_Search_Reader();
                     Search(root->left_son_ptr, k_nearest, point, q, max_dist);
-                    pthread_mutex_lock(&search_flag_mutex);
-                    search_mutex_counter -= 1;
-                    pthread_mutex_unlock(&search_flag_mutex);
+                    Release_Search_Reader();
                 }
             }
         }
@@ -1201,19 +1214,9 @@ void KD_TREE<PointType>::Search(KD_TREE_NODE *root, int k_nearest, PointType poi
             }
             else
             {
-                pthread_mutex_lock(&search_flag_mutex);
-                while (search_mutex_counter == -1)
-                {
-                    pthread_mutex_unlock(&search_flag_mutex);
-                    usleep(1);
-                    pthread_mutex_lock(&search_flag_mutex);
-                }
-                search_mutex_counter += 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Acquire_Search_Reader();
                 Search(root->left_son_ptr, k_nearest, point, q, max_dist);
-                pthread_mutex_lock(&search_flag_mutex);
-                search_mutex_counter -= 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Release_Search_Reader();
             }
         }
         if (dist_right_node < q.top().dist)
@@ -1224,19 +1227,9 @@ void KD_TREE<PointType>::Search(KD_TREE_NODE *root, int k_nearest, PointType poi
             }
             else
             {
-                pthread_mutex_lock(&search_flag_mutex);
-                while (search_mutex_counter == -1)
-                {
-                    pthread_mutex_unlock(&search_flag_mutex);
-                    usleep(1);
-                    pthread_mutex_lock(&search_flag_mutex);
-                }
-                search_mutex_counter += 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Acquire_Search_Reader();
                 Search(root->right_son_ptr, k_nearest, point, q, max_dist);
-                pthread_mutex_lock(&search_flag_mutex);
-                search_mutex_counter -= 1;
-                pthread_mutex_unlock(&search_flag_mutex);
+                Release_Search_Reader();
             }
         }
     }
@@ -1725,4 +1718,3 @@ bool KD_TREE<PointType>::point_cmp_z(PointType a, PointType b) { return a.z < b.
 template class KD_TREE<pcl::PointXYZ>;
 template class KD_TREE<pcl::PointXYZI>;
 template class KD_TREE<pcl::PointXYZINormal>;
-

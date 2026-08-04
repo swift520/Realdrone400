@@ -139,6 +139,17 @@ FAST-LIO，再添加 `--with-lidar`；这会显著增加磁盘写入量。落地
 `~/flight_logs/`，完整选项和故障恢复方法见
 `src/realflight_modules/real_drone_bringup/README.md`。
 
+FAST-LIO 的计时诊断默认只在单帧墙钟耗时超过 50 ms，或相邻处理帧起始间隔
+超过 250 ms 时输出 `[fastlio_timing]` 告警，并按 1 秒限频。`scope=frame`
+会列出 IMU、ICP、地图更新和点云发布等阶段的
+`墙钟/主线程 CPU` 耗时；`ikdtree_rebuild_wait_max_ms` 是本帧因 iKD-tree 异步
+重建而发生的最长一次搜索等待；`scope=livox_lidar_preprocess` 或
+`scope=imu_callback` 则直接指出慢回调。`dominant_hint=parallel_or_wait` 只是说明耗时没有
+发生在主线程上，也可能是 OpenMP 工作线程计算，不能单独解释为磁盘 I/O。
+`frame_start_gap` 同时给出墙钟间隔和雷达时间戳间隔：只有前者明显大于后者时，
+才支持“雷达时间戳连续但进程/回调处理变晚”的判断。阈值可在
+`FAST_LIO/config/mid360.yaml` 的 `diagnostics` 段调整，设为 `0` 可关闭相应告警。
+
 标准真机启动脚本使用 `start_realsense_recording.sh`，保留 640 x 480 的 Raw RGB
 和 Raw Depth，但将相机图像流统一配置为 15 Hz，以降低 USB、CPU 和录包写盘负载。
 如果已有其他 RealSense 节点以不同帧率运行，启动脚本会报错退出，需先关闭旧节点

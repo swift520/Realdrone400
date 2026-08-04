@@ -1,5 +1,7 @@
 #pragma once
 #include <stdio.h>
+#include <atomic>
+#include <cstdint>
 #include <queue>
 #include <pthread.h>
 #include <chrono>
@@ -55,6 +57,17 @@ class KD_TREE
 public:
     using PointVector = std::vector<PointType, Eigen::aligned_allocator<PointType>>;
     using Ptr = std::shared_ptr<KD_TREE<PointType>>;
+
+    struct SearchWaitStats
+    {
+        // Reader-acquire waits observed while an asynchronous rebuild owns
+        // the search window.  With OpenMP, sum_ns aggregates overlapping
+        // worker waits and can exceed ICP wall time; max_ns is the longest
+        // individual wait.  events is reader waits, not rebuild count.
+        uint64_t events = 0;
+        uint64_t sum_ns = 0;
+        uint64_t max_ns = 0;
+    };
     
     struct KD_TREE_NODE
     {
@@ -266,10 +279,16 @@ private:
     PointVector Rebuild_PCL_Storage;
     KD_TREE_NODE **Rebuild_Ptr = nullptr;
     int search_mutex_counter = 0;
+    std::atomic<uint64_t> search_wait_events{0};
+    std::atomic<uint64_t> search_wait_sum_ns{0};
+    std::atomic<uint64_t> search_wait_max_ns{0};
     static void *multi_thread_ptr(void *arg);
     void multi_thread_rebuild();
     void start_thread();
     void stop_thread();
+    void Acquire_Search_Reader();
+    void Release_Search_Reader();
+    void Record_Search_Wait(uint64_t wait_ns);
     void run_operation(KD_TREE_NODE **root, Operation_Logger_Type operation);
     // KD Tree Functions and augmented variables
     int Treesize_tmp = 0, Validnum_tmp = 0;
@@ -321,6 +340,9 @@ public:
         downsample_size = downsample_param;
     }
     void InitializeKDTree(float delete_param = 0.5, float balance_param = 0.7, float box_length = 0.2);
+    // Call only after all Nearest_Search workers for the measured frame have
+    // joined.  The three diagnostic atomics are reset independently.
+    SearchWaitStats Take_Search_Wait_Stats();
     int size();
     int validnum();
     void root_alpha(float &alpha_bal, float &alpha_del);

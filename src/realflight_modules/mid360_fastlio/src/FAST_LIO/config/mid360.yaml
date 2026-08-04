@@ -10,6 +10,10 @@ preprocess:
     scan_line: 4
     blind: 1
 
+diagnostics:
+    frame_deadline_ms: 50.0       # warn only when one FAST-LIO frame exceeds this wall-clock time; 0 disables warnings
+    frame_gap_warning_ms: 250.0   # warn on long wall-time gaps between processed frames; compare the logged LiDAR-stamp gap; 0 disables
+
 mapping:
     acc_cov: 0.1
     gyr_cov: 0.1

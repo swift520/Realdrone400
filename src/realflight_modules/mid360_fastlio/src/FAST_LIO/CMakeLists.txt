@@ -93,4 +93,5 @@ target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 if(CATKIN_ENABLE_TESTING)
   catkin_add_gtest(test_esekf_update_status test/test_esekf_update_status.cpp)
+  catkin_add_gtest(test_deadline_monitor test/test_deadline_monitor.cpp)
 endif()

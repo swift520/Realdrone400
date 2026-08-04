@@ -59,12 +59,196 @@
 #include <geometry_msgs/Vector3.h>
 #include <livox_ros_driver2/CustomMsg.h>
 #include "preprocess.h"
+#include <frame_deadline_monitor.hpp>
 #include <ikd-Tree/ikd_Tree.h>
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
+
+namespace
+{
+
+using fast_lio::diagnostics::DeadlineExceeded;
+using fast_lio::diagnostics::DominantTimeName;
+using fast_lio::diagnostics::DurationPair;
+using fast_lio::diagnostics::FrameDeadlineMonitor;
+using fast_lio::diagnostics::MillisecondsToNanoseconds;
+using fast_lio::diagnostics::NanosecondsToMilliseconds;
+using fast_lio::diagnostics::Stage;
+using fast_lio::diagnostics::StageDuration;
+using fast_lio::diagnostics::TimingSnapshot;
+using fast_lio::diagnostics::WallMinusMainThreadCpuNanoseconds;
+using fast_lio::diagnostics::WarningThrottle;
+
+constexpr double kDefaultFrameDeadlineMs = 50.0;
+constexpr double kDefaultFrameGapWarningMs = 250.0;
+constexpr double kTimingWarningThrottleMs = 1000.0;
+
+std::uint64_t frame_deadline_ns =
+    MillisecondsToNanoseconds(kDefaultFrameDeadlineMs);
+std::uint64_t frame_gap_warning_ns =
+    MillisecondsToNanoseconds(kDefaultFrameGapWarningMs);
+WarningThrottle frame_warning_throttle(
+    MillisecondsToNanoseconds(kTimingWarningThrottleMs));
+WarningThrottle callback_warning_throttle(
+    MillisecondsToNanoseconds(kTimingWarningThrottleMs));
+WarningThrottle frame_gap_warning_throttle(
+    MillisecondsToNanoseconds(kTimingWarningThrottleMs));
+
+double WallMilliseconds(const DurationPair &duration)
+{
+    return NanosecondsToMilliseconds(duration.wall_ns);
+}
+
+double CpuMilliseconds(const DurationPair &duration)
+{
+    return NanosecondsToMilliseconds(duration.thread_cpu_ns);
+}
+
+void ReportSlowSection(
+    const char *scope,
+    double lidar_stamp,
+    std::size_t point_count,
+    const TimingSnapshot &timing)
+{
+    if (!DeadlineExceeded(timing, frame_deadline_ns) ||
+        !callback_warning_throttle.Allow(timing.end_wall_ns))
+    {
+        return;
+    }
+
+    ROS_WARN(
+        "[fastlio_timing] deadline_overrun scope=%s lidar_stamp=%.6f "
+        "item_count=%zu total_wall_ms=%.3f main_thread_cpu_ms=%.3f "
+        "wall_minus_main_thread_cpu_ms=%.3f cpu_clock_valid=%d "
+        "dominant_hint=%s",
+        scope,
+        lidar_stamp,
+        point_count,
+        NanosecondsToMilliseconds(timing.total_wall_ns),
+        NanosecondsToMilliseconds(timing.total_thread_cpu_ns),
+        NanosecondsToMilliseconds(WallMinusMainThreadCpuNanoseconds(timing)),
+        timing.thread_cpu_valid ? 1 : 0,
+        DominantTimeName(fast_lio::diagnostics::ClassifyDominantTime(timing)));
+}
+
+class SlowFrameTiming
+{
+public:
+    SlowFrameTiming(double lidar_stamp, std::size_t raw_points)
+        : lidar_stamp_(lidar_stamp), raw_points_(raw_points)
+    {
+    }
+
+    ~SlowFrameTiming()
+    {
+        const TimingSnapshot timing = monitor_.Finish(Stage::Other);
+        if (!DeadlineExceeded(timing, frame_deadline_ns) ||
+            !frame_warning_throttle.Allow(timing.end_wall_ns))
+        {
+            return;
+        }
+
+        const DurationPair &imu = StageDuration(timing, Stage::Imu);
+        const DurationPair &fov = StageDuration(timing, Stage::Fov);
+        const DurationPair &downsample = StageDuration(timing, Stage::Downsample);
+        const DurationPair &pre_icp = StageDuration(timing, Stage::PreIcp);
+        const DurationPair &icp = StageDuration(timing, Stage::Icp);
+        const DurationPair &post_icp = StageDuration(timing, Stage::PostIcp);
+        const DurationPair &odom = StageDuration(timing, Stage::OdomPublish);
+        const DurationPair &map = StageDuration(timing, Stage::MapUpdate);
+        const DurationPair &output = StageDuration(timing, Stage::OutputPublish);
+        const DurationPair &runtime_log = StageDuration(timing, Stage::RuntimeLog);
+        const DurationPair &other = StageDuration(timing, Stage::Other);
+
+        ROS_WARN(
+            "[fastlio_timing] deadline_overrun scope=frame outcome=%s "
+            "lidar_stamp=%.6f raw_points=%zu down_points=%d map_points=%d "
+            "effective_points=%d total_wall_ms=%.3f main_thread_cpu_ms=%.3f "
+            "wall_minus_main_thread_cpu_ms=%.3f cpu_clock_valid=%d dominant_hint=%s "
+            "imu_wall_maincpu_ms=%.3f/%.3f fov_wall_maincpu_ms=%.3f/%.3f "
+            "downsample_wall_maincpu_ms=%.3f/%.3f pre_icp_wall_maincpu_ms=%.3f/%.3f "
+            "icp_wall_maincpu_ms=%.3f/%.3f post_icp_wall_maincpu_ms=%.3f/%.3f "
+            "odom_pub_wall_maincpu_ms=%.3f/%.3f map_update_wall_maincpu_ms=%.3f/%.3f "
+            "output_pub_wall_maincpu_ms=%.3f/%.3f runtime_log_wall_maincpu_ms=%.3f/%.3f "
+            "other_wall_maincpu_ms=%.3f/%.3f ikdtree_rebuild_wait_events=%llu "
+            "ikdtree_rebuild_wait_aggregate_ms=%.3f "
+            "ikdtree_rebuild_wait_max_ms=%.3f",
+            outcome_,
+            lidar_stamp_,
+            raw_points_,
+            down_points_,
+            map_points_,
+            effective_points_,
+            NanosecondsToMilliseconds(timing.total_wall_ns),
+            NanosecondsToMilliseconds(timing.total_thread_cpu_ns),
+            NanosecondsToMilliseconds(WallMinusMainThreadCpuNanoseconds(timing)),
+            timing.thread_cpu_valid ? 1 : 0,
+            DominantTimeName(fast_lio::diagnostics::ClassifyDominantTime(timing)),
+            WallMilliseconds(imu), CpuMilliseconds(imu),
+            WallMilliseconds(fov), CpuMilliseconds(fov),
+            WallMilliseconds(downsample), CpuMilliseconds(downsample),
+            WallMilliseconds(pre_icp), CpuMilliseconds(pre_icp),
+            WallMilliseconds(icp), CpuMilliseconds(icp),
+            WallMilliseconds(post_icp), CpuMilliseconds(post_icp),
+            WallMilliseconds(odom), CpuMilliseconds(odom),
+            WallMilliseconds(map), CpuMilliseconds(map),
+            WallMilliseconds(output), CpuMilliseconds(output),
+            WallMilliseconds(runtime_log), CpuMilliseconds(runtime_log),
+            WallMilliseconds(other), CpuMilliseconds(other),
+            static_cast<unsigned long long>(ikdtree_wait_events_),
+            NanosecondsToMilliseconds(ikdtree_wait_sum_ns_),
+            NanosecondsToMilliseconds(ikdtree_wait_max_ns_));
+    }
+
+    void Mark(Stage stage)
+    {
+        monitor_.Mark(stage);
+    }
+
+    void SetOutcome(const char *outcome)
+    {
+        outcome_ = outcome;
+    }
+
+    void SetDownPoints(int down_points)
+    {
+        down_points_ = down_points;
+    }
+
+    void SetMapPoints(int map_points)
+    {
+        map_points_ = map_points;
+    }
+
+    void SetEffectivePoints(int effective_points)
+    {
+        effective_points_ = effective_points;
+    }
+
+    void SetIkdtreeWait(std::uint64_t events, std::uint64_t sum_ns, std::uint64_t max_ns)
+    {
+        ikdtree_wait_events_ = events;
+        ikdtree_wait_sum_ns_ = sum_ns;
+        ikdtree_wait_max_ns_ = max_ns;
+    }
+
+private:
+    FrameDeadlineMonitor monitor_;
+    const double lidar_stamp_;
+    const std::size_t raw_points_;
+    const char *outcome_ = "incomplete";
+    int down_points_ = -1;
+    int map_points_ = -1;
+    int effective_points_ = -1;
+    std::uint64_t ikdtree_wait_events_ = 0;
+    std::uint64_t ikdtree_wait_sum_ns_ = 0;
+    std::uint64_t ikdtree_wait_max_ns_ = 0;
+};
+
+}  // namespace
 
 /*** Time Log Variables ***/
 double kdtree_incremental_time = 0.0, kdtree_search_time = 0.0, kdtree_delete_time = 0.0;
@@ -250,6 +434,8 @@ void SigHandle(int sig)
 
 inline void dump_lio_state_to_log(FILE *fp)  
 {
+    if (fp == nullptr) return;
+
     V3D rot_ang(Log(state_point.rot.toRotationMatrix()));
     fprintf(fp, "%lf ", Measures.lidar_beg_time - first_lidar_time);
     fprintf(fp, "%lf %lf %lf ", rot_ang(0), rot_ang(1), rot_ang(2));                   // Angle
@@ -261,7 +447,6 @@ inline void dump_lio_state_to_log(FILE *fp)
     fprintf(fp, "%lf %lf %lf ", state_point.ba(0), state_point.ba(1), state_point.ba(2));    // Bias_a  
     fprintf(fp, "%lf %lf %lf ", state_point.grav[0], state_point.grav[1], state_point.grav[2]); // Bias_a  
     fprintf(fp, "\r\n");  
-    fflush(fp);
 }
 
 void pointBodyToWorld_ikfom(PointType const * const pi, PointType * const po, state_ikfom &s)
@@ -379,6 +564,7 @@ void lasermap_fov_segment()
 
 void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg) 
 {
+    FrameDeadlineMonitor preprocess_timing;
     mtx_buffer.lock();
     scan_count ++;
     double preprocess_start_time = omp_get_wtime();
@@ -396,12 +582,18 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+    ReportSlowSection(
+        "standard_lidar_preprocess",
+        msg->header.stamp.toSec(),
+        msg->width * msg->height,
+        preprocess_timing.Finish(Stage::Callbacks));
 }
 
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
 void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
 {
+    FrameDeadlineMonitor preprocess_timing;
     mtx_buffer.lock();
     double preprocess_start_time = omp_get_wtime();
     scan_count ++;
@@ -432,10 +624,16 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+    ReportSlowSection(
+        "livox_lidar_preprocess",
+        msg->header.stamp.toSec(),
+        msg->point_num,
+        preprocess_timing.Finish(Stage::Callbacks));
 }
 
 void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) 
 {
+    FrameDeadlineMonitor callback_timing;
     publish_count ++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
@@ -487,6 +685,11 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     }
 
     sig_buffer.notify_all();
+    ReportSlowSection(
+        "imu_callback",
+        msg->header.stamp.toSec(),
+        1U,
+        callback_timing.Finish(Stage::Callbacks));
 }
 
 double lidar_mean_scantime = 0.0;
@@ -908,6 +1111,40 @@ int main(int argc, char** argv)
     nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
     nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
     nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
+    double configured_frame_deadline_ms = kDefaultFrameDeadlineMs;
+    double configured_frame_gap_warning_ms = kDefaultFrameGapWarningMs;
+    nh.param<double>(
+        "diagnostics/frame_deadline_ms",
+        configured_frame_deadline_ms,
+        kDefaultFrameDeadlineMs);
+    nh.param<double>(
+        "diagnostics/frame_gap_warning_ms",
+        configured_frame_gap_warning_ms,
+        kDefaultFrameGapWarningMs);
+    if (!std::isfinite(configured_frame_deadline_ms) || configured_frame_deadline_ms < 0.0)
+    {
+        ROS_WARN(
+            "Invalid diagnostics/frame_deadline_ms=%.3f; using %.3f ms.",
+            configured_frame_deadline_ms,
+            kDefaultFrameDeadlineMs);
+        configured_frame_deadline_ms = kDefaultFrameDeadlineMs;
+    }
+    if (!std::isfinite(configured_frame_gap_warning_ms) || configured_frame_gap_warning_ms < 0.0)
+    {
+        ROS_WARN(
+            "Invalid diagnostics/frame_gap_warning_ms=%.3f; using %.3f ms.",
+            configured_frame_gap_warning_ms,
+            kDefaultFrameGapWarningMs);
+        configured_frame_gap_warning_ms = kDefaultFrameGapWarningMs;
+    }
+    frame_deadline_ns = MillisecondsToNanoseconds(configured_frame_deadline_ms);
+    frame_gap_warning_ns = MillisecondsToNanoseconds(configured_frame_gap_warning_ms);
+    ROS_INFO(
+        "[fastlio_timing] diagnostics configured: frame_deadline_ms=%.3f "
+        "frame_gap_warning_ms=%.3f warning_throttle_ms=%.3f",
+        configured_frame_deadline_ms,
+        configured_frame_gap_warning_ms,
+        kTimingWarningThrottleMs);
     nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true);
     nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
@@ -947,19 +1184,34 @@ int main(int argc, char** argv)
     fill(epsi, epsi+23, 0.001);
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
-    /*** debug record ***/
-    FILE *fp;
-    string pos_log_dir = root_dir + "/Log/pos_log.txt";
-    fp = fopen(pos_log_dir.c_str(),"w");
+    /*** Optional debug record. Never put file I/O on the flight path unless
+     * runtime logging was explicitly requested. ***/
+    FILE *fp = nullptr;
+    ofstream fout_pre, fout_out;
+    if (runtime_pos_log)
+    {
+        const string pos_log_dir = root_dir + "/Log/pos_log.txt";
+        fp = fopen(pos_log_dir.c_str(), "w");
+        fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"), ios::out);
+        fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), ios::out);
 
-    ofstream fout_pre, fout_out, fout_dbg;
-    fout_pre.open(DEBUG_FILE_DIR("mat_pre.txt"),ios::out);
-    fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
-    fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
-    if (fout_pre && fout_out)
-        cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
-    else
-        cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        if (fp == nullptr || !fout_pre.is_open() || !fout_out.is_open())
+        {
+            ROS_ERROR("FAST-LIO runtime log files could not be opened; disabling runtime logging.");
+            if (fp != nullptr)
+            {
+                fclose(fp);
+                fp = nullptr;
+            }
+            if (fout_pre.is_open()) fout_pre.close();
+            if (fout_out.is_open()) fout_out.close();
+            runtime_pos_log = false;
+        }
+        else
+        {
+            ROS_INFO("FAST-LIO runtime logging enabled under %sLog/.", ROOT_DIR);
+        }
+    }
 
     /*** ROS subscribe initialization ***/
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? \
@@ -984,12 +1236,53 @@ int main(int argc, char** argv)
     signal(SIGINT, SigHandle);
     ros::Rate rate(5000);
     bool status = ros::ok();
+    std::uint64_t previous_frame_start_ns = 0;
+    double previous_frame_lidar_stamp = 0.0;
     while (status)
     {
         if (flg_exit) break;
         ros::spinOnce();
         if(sync_packages(Measures)) 
         {
+            const std::uint64_t frame_start_ns =
+                FrameDeadlineMonitor::SteadyNowNanoseconds();
+            if (previous_frame_start_ns != 0 && frame_gap_warning_ns > 0)
+            {
+                const std::uint64_t frame_gap_ns =
+                    frame_start_ns >= previous_frame_start_ns
+                        ? frame_start_ns - previous_frame_start_ns
+                        : 0ULL;
+                if (frame_gap_ns > frame_gap_warning_ns &&
+                    frame_gap_warning_throttle.Allow(frame_start_ns))
+                {
+                    double lidar_stamp_gap_ms = -1.0;
+                    double wall_minus_lidar_gap_ms = -1.0;
+                    if (previous_frame_lidar_stamp > 0.0 &&
+                        Measures.lidar_beg_time >= previous_frame_lidar_stamp)
+                    {
+                        lidar_stamp_gap_ms =
+                            (Measures.lidar_beg_time - previous_frame_lidar_stamp) * 1000.0;
+                        const double frame_gap_ms =
+                            NanosecondsToMilliseconds(frame_gap_ns);
+                        wall_minus_lidar_gap_ms =
+                            frame_gap_ms > lidar_stamp_gap_ms
+                                ? frame_gap_ms - lidar_stamp_gap_ms
+                                : 0.0;
+                    }
+                    ROS_WARN(
+                        "[fastlio_timing] frame_start_gap lidar_stamp=%.6f "
+                        "wall_gap_ms=%.3f lidar_stamp_gap_ms=%.3f "
+                        "wall_minus_lidar_gap_ms=%.3f threshold_ms=%.3f",
+                        Measures.lidar_beg_time,
+                        NanosecondsToMilliseconds(frame_gap_ns),
+                        lidar_stamp_gap_ms,
+                        wall_minus_lidar_gap_ms,
+                        NanosecondsToMilliseconds(frame_gap_warning_ns));
+                }
+            }
+            previous_frame_start_ns = frame_start_ns;
+            previous_frame_lidar_stamp = Measures.lidar_beg_time;
+
             if (flg_first_scan)
             {
                 first_lidar_time = Measures.lidar_beg_time;
@@ -997,6 +1290,10 @@ int main(int argc, char** argv)
                 flg_first_scan = false;
                 continue;
             }
+
+            SlowFrameTiming frame_timing(
+                Measures.lidar_beg_time,
+                Measures.lidar == nullptr ? 0U : Measures.lidar->points.size());
 
             double t0,t1,t2,t3,t4,t5,match_start, solve_start, svd_time;
 
@@ -1010,9 +1307,11 @@ int main(int argc, char** argv)
             p_imu->Process(Measures, kf, feats_undistort);
             state_point = kf.get_x();
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+            frame_timing.Mark(Stage::Imu);
 
-            if (feats_undistort->empty() || (feats_undistort == NULL))
+            if (feats_undistort == nullptr || feats_undistort->empty())
             {
+                frame_timing.SetOutcome("empty_undistorted_cloud");
                 ROS_WARN("No point, skip this scan!\n");
                 continue;
             }
@@ -1021,12 +1320,15 @@ int main(int argc, char** argv)
                             false : true;
             /*** Segment the map in lidar FOV ***/
             lasermap_fov_segment();
+            frame_timing.Mark(Stage::Fov);
 
             /*** downsample the feature points in a scan ***/
             downSizeFilterSurf.setInputCloud(feats_undistort);
             downSizeFilterSurf.filter(*feats_down_body);
+            frame_timing.Mark(Stage::Downsample);
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
+            frame_timing.SetDownPoints(feats_down_size);
             /*** initialize the map kdtree ***/
             if(ikdtree.Root_Node == nullptr)
             {
@@ -1040,26 +1342,42 @@ int main(int argc, char** argv)
                     }
                     ikdtree.Build(feats_down_world->points);
                 }
+                frame_timing.Mark(Stage::MapUpdate);
+                frame_timing.SetOutcome("map_initialized");
                 continue;
             }
             int featsFromMapNum = ikdtree.validnum();
             kdtree_size_st = ikdtree.size();
+            frame_timing.SetMapPoints(kdtree_size_st);
             
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
             /*** ICP and iterated Kalman filter update ***/
             if (feats_down_size < 5)
             {
+                frame_timing.SetOutcome("too_few_downsampled_points");
                 ROS_WARN("No point, skip this scan!\n");
                 continue;
             }
             
             normvec->resize(feats_down_size);
             feats_down_world->resize(feats_down_size);
+            frame_timing.Mark(Stage::PreIcp);
 
-            V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
-            fout_pre<<setw(20)<<Measures.lidar_beg_time - first_lidar_time<<" "<<euler_cur.transpose()<<" "<< state_point.pos.transpose()<<" "<<ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<< " " << state_point.vel.transpose() \
-            <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<< endl;
+            if (runtime_pos_log)
+            {
+                const V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
+                fout_pre << setw(20) << Measures.lidar_beg_time - first_lidar_time
+                         << " " << euler_cur.transpose()
+                         << " " << state_point.pos.transpose()
+                         << " " << ext_euler.transpose()
+                         << " " << state_point.offset_T_L_I.transpose()
+                         << " " << state_point.vel.transpose()
+                         << " " << state_point.bg.transpose()
+                         << " " << state_point.ba.transpose()
+                         << " " << state_point.grav << '\n';
+            }
+            frame_timing.Mark(Stage::RuntimeLog);
 
             if(0) // If you need to see map point, change to "if(1)"
             {
@@ -1073,19 +1391,31 @@ int main(int argc, char** argv)
             Nearest_Points.resize(feats_down_size);
             int  rematch_num = 0;
             bool nearest_search_en = true; //
+            frame_timing.Mark(Stage::PreIcp);
 
             t2 = omp_get_wtime();
             
             /*** iterated state estimation ***/
+            // Discard any wait event that predates this filter update.  The
+            // second take below runs after all OpenMP search workers have
+            // joined, so the values belong to this frame's ICP stage.
+            ikdtree.Take_Search_Wait_Stats();
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             const bool correction_applied =
                 kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
             state_point = kf.get_x();
+            const KD_TREE<PointType>::SearchWaitStats ikdtree_wait =
+                ikdtree.Take_Search_Wait_Stats();
+            frame_timing.SetIkdtreeWait(
+                ikdtree_wait.events, ikdtree_wait.sum_ns, ikdtree_wait.max_ns);
+            frame_timing.SetEffectivePoints(effct_feat_num);
+            frame_timing.Mark(Stage::Icp);
             double t_update_end = omp_get_wtime();
 
             if (!correction_applied)
             {
+                frame_timing.SetOutcome("correction_rejected");
                 // Keep the high-rate stream extrapolating from the last valid
                 // correction, but never re-anchor it to this IMU-only state.
                 // Because /Odometry is not refreshed here, the independent
@@ -1102,6 +1432,7 @@ int main(int argc, char** argv)
                 {
                     publish_frame_body(pubLaserCloudFull_body);
                 }
+                frame_timing.Mark(Stage::OutputPublish);
             }
             else
             {
@@ -1114,14 +1445,17 @@ int main(int argc, char** argv)
 
                 init = true;
                 updateLatestStates();
+                frame_timing.Mark(Stage::PostIcp);
 
                 /******* Publish odometry *******/
                 publish_odometry(pubOdomAftMapped);
+                frame_timing.Mark(Stage::OdomPublish);
 
                 /*** add the feature points to map kdtree ***/
                 t3 = omp_get_wtime();
                 map_incremental();
                 t5 = omp_get_wtime();
+                frame_timing.Mark(Stage::MapUpdate);
 
                 /******* Publish points *******/
                 if (path_en)                         publish_path(pubPath);
@@ -1129,6 +1463,7 @@ int main(int argc, char** argv)
                 if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);
                 // publish_effect_world(pubLaserCloudEffect);
                 // publish_map(pubLaserCloudMap);
+                frame_timing.Mark(Stage::OutputPublish);
 
                 /*** Debug variables ***/
                 if (runtime_pos_log)
@@ -1154,11 +1489,13 @@ int main(int argc, char** argv)
                     s_plot10[time_log_counter] = add_point_size;
                     time_log_counter ++;
                     printf("[ mapping ]: time: IMU + Map + Input Downsample: %0.6f ave match: %0.6f ave solve: %0.6f  ave ICP: %0.6f  map incre: %0.6f ave total: %0.6f icp: %0.6f construct H: %0.6f \n",t1-t0,aver_time_match,aver_time_solve,t3-t1,t5-t3,aver_time_consu,aver_time_icp, aver_time_const_H_time);
-                    ext_euler = SO3ToEuler(state_point.offset_R_L_I);
+                    const V3D ext_euler = SO3ToEuler(state_point.offset_R_L_I);
                     fout_out << setw(20) << Measures.lidar_beg_time - first_lidar_time << " " << euler_cur.transpose() << " " << state_point.pos.transpose()<< " " << ext_euler.transpose() << " "<<state_point.offset_T_L_I.transpose()<<" "<< state_point.vel.transpose() \
-                    <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<endl;
+                    <<" "<<state_point.bg.transpose()<<" "<<state_point.ba.transpose()<<" "<<state_point.grav<<" "<<feats_undistort->points.size()<<'\n';
                     dump_lio_state_to_log(fp);
                 }
+                frame_timing.Mark(Stage::RuntimeLog);
+                frame_timing.SetOutcome("correction_applied");
             }
         }
 
@@ -1178,25 +1515,37 @@ int main(int argc, char** argv)
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
     }
 
-    fout_out.close();
-    fout_pre.close();
+    if (fout_out.is_open()) fout_out.close();
+    if (fout_pre.is_open()) fout_pre.close();
+    if (fp != nullptr)
+    {
+        fclose(fp);
+        fp = nullptr;
+    }
 
     if (runtime_pos_log)
     {
         vector<double> t, s_vec, s_vec2, s_vec3, s_vec4, s_vec5, s_vec6, s_vec7;    
         FILE *fp2;
         string log_dir = root_dir + "/Log/fast_lio_time_log.csv";
-        fp2 = fopen(log_dir.c_str(),"w");
-        fprintf(fp2,"time_stamp, total time, scan point size, incremental time, search time, delete size, delete time, tree size st, tree size end, add point size, preprocess time\n");
-        for (int i = 0;i<time_log_counter; i++){
-            fprintf(fp2,"%0.8f,%0.8f,%d,%0.8f,%0.8f,%d,%0.8f,%d,%d,%d,%0.8f\n",T1[i],s_plot[i],int(s_plot2[i]),s_plot3[i],s_plot4[i],int(s_plot5[i]),s_plot6[i],int(s_plot7[i]),int(s_plot8[i]), int(s_plot10[i]), s_plot11[i]);
-            t.push_back(T1[i]);
-            s_vec.push_back(s_plot9[i]);
-            s_vec2.push_back(s_plot3[i] + s_plot6[i]);
-            s_vec3.push_back(s_plot4[i]);
-            s_vec5.push_back(s_plot[i]);
+        fp2 = fopen(log_dir.c_str(), "w");
+        if (fp2 == nullptr)
+        {
+            ROS_ERROR("FAST-LIO timing log could not be opened: %s", log_dir.c_str());
         }
-        fclose(fp2);
+        else
+        {
+            fprintf(fp2,"time_stamp, total time, scan point size, incremental time, search time, delete size, delete time, tree size st, tree size end, add point size, preprocess time\n");
+            for (int i = 0;i<time_log_counter; i++){
+                fprintf(fp2,"%0.8f,%0.8f,%d,%0.8f,%0.8f,%d,%0.8f,%d,%d,%d,%0.8f\n",T1[i],s_plot[i],int(s_plot2[i]),s_plot3[i],s_plot4[i],int(s_plot5[i]),s_plot6[i],int(s_plot7[i]),int(s_plot8[i]), int(s_plot10[i]), s_plot11[i]);
+                t.push_back(T1[i]);
+                s_vec.push_back(s_plot9[i]);
+                s_vec2.push_back(s_plot3[i] + s_plot6[i]);
+                s_vec3.push_back(s_plot4[i]);
+                s_vec5.push_back(s_plot[i]);
+            }
+            fclose(fp2);
+        }
     }
 
     return 0;
